@@ -12,6 +12,7 @@ Coverage:
 - Tensor-Parallel
 - VAE-Patch-Parallel
 - HSDP
+- Ring-Attn
 
 assert_diffusion_response validates successful generation
 """
@@ -22,7 +23,6 @@ from tests.conftest import (
     OmniServer,
     OmniServerParams,
     OpenAIClientHandler,
-    dummy_messages_from_mix_data,
     generate_synthetic_image,
 )
 from tests.utils import hardware_marks
@@ -41,9 +41,9 @@ WAN22_MODELS = [
 PARALLEL_CONFIGS = [
     ("cfg_parallel", ["--cfg-parallel-size", "2"]),
     ("ulysses_sp", ["--usp", "2"]),
-    ("tensor_parallel", ["--tensor-parallel-size", "2"]),
-    ("vae_patch", ["--vae-patch-parallel-size", "2"]),
+    ("tp_vae_patch", ["--tensor-parallel-size", "2", "--vae-patch-parallel-size", "2"]),
     ("hsdp", ["--use-hsdp", "--hsdp-shard-size", "2"]),  # replicate_size=1 (default)
+    ("ring_atten", ["--ring", "2"]),
 ]
 
 
@@ -62,7 +62,7 @@ def _get_wan22_feature_cases():
             pytest.param(
                 OmniServerParams(
                     model=model_path,
-                    server_args=["--cache-backend", "cache_dit"],
+                    server_args=["--cache-backend", "cache_dit", "--enable-layerwise-offload"],
                 ),
                 id=f"{model_key}_cache_dit",
                 marks=SINGLE_CARD_FEATURE_MARKS,
@@ -98,37 +98,34 @@ def test_wan22_diffusion_features(
     is_i2v_or_ti2v = any(kw in model_path for kw in ["I2V", "TI2V"])
     is_moe_model = "I2V-A14B" in model_path  # Only I2V-A14B uses MoE per spec
 
-    if is_i2v_or_ti2v:
-        image_data_url = f"data:image/jpeg;base64,{generate_synthetic_image(512, 512)['base64']}"
-        messages = dummy_messages_from_mix_data(image_data_url=image_data_url, content_text=PROMPT)
-    else:
-        messages = dummy_messages_from_mix_data(content_text=PROMPT)
-
-    extra_body = {
+    form_data = {
+        "prompt": PROMPT,
+        "negative_prompt": NEGATIVE_PROMPT,
         "height": 512,
         "width": 512,
         "num_frames": 8,
         "fps": 8,
         "num_inference_steps": 2,
         "guidance_scale": 4.0,
-        "negative_prompt": NEGATIVE_PROMPT,
         "seed": 42,
         # flow_shift omitted: Service uses resolution-based defaults (12.0 for 512px)
         # vae_use_slicing/tiling omitted: Service-side optimization, not request param
     }
 
     if is_moe_model:
-        extra_body.update(
+        form_data.update(
             {
-                "guidance_scale_high": 1.0,
+                "guidance_scale_2": 1.0,
                 "boundary_ratio": 0.5,
             }
         )
 
     request_config = {
         "model": model_path,
-        "messages": messages,
-        "extra_body": extra_body,
+        "form_data": form_data,
     }
 
-    openai_client.send_diffusion_request(request_config)
+    if is_i2v_or_ti2v:
+        request_config["image_reference"] = f"data:image/jpeg;base64,{generate_synthetic_image(512, 512)['base64']}"
+
+    openai_client.send_video_diffusion_request(request_config)

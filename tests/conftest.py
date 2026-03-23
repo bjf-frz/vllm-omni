@@ -60,6 +60,102 @@ class OmniServerParams(NamedTuple):
     server_args: list[str] | None = None
 
 
+def assert_image_diffusion_response(
+    response,
+    request_config: dict[str, Any],
+    run_level: str = None,
+) -> None:
+    """
+    Validate image diffusion response.
+
+    Expected request_config schema:
+        {
+            "request_type": "image",
+            "extra_body": {
+                "num_outputs_per_prompt": 1,
+                "width": ...,
+                "height": ...,
+                ...
+            }
+        }
+    """
+    extra_body = request_config.get("extra_body", {})
+
+    num_outputs_per_prompt = extra_body.get("num_outputs_per_prompt", 1)
+
+    assert response.images is not None, "Image response is None"
+    assert len(response.images) > 0, "No images in response"
+    assert len(response.images) == num_outputs_per_prompt, (
+        f"Expected {num_outputs_per_prompt} images, got {len(response.images)}"
+    )
+
+    if run_level == "advanced_model":
+        expected_width = extra_body["width"]  # intentionally raise KeyError if missing
+        expected_height = extra_body["height"]  # intentionally raise KeyError if missing
+
+        for img in response.images:
+            assert_image_valid(img, width=expected_width, height=expected_height)
+
+
+def assert_video_diffusion_response(
+    response,
+    request_config: dict[str, Any],
+    run_level: str = None,
+) -> None:
+    """
+    Validate video diffusion response.
+
+    Expected request_config schema:
+        {
+            "request_type": "video",
+            "form_data": {
+                "prompt": "...",
+                "num_frames": ...,
+                "width": ...,
+                "height": ...,
+                "fps": ...,
+                ...
+            }
+        }
+    """
+    form_data = request_config.get("form_data", {})
+
+    assert response.videos is not None, "Video response is None"
+    assert len(response.videos) > 0, "No videos in response"
+
+    expected_frames = _maybe_int(form_data.get("num_frames"))
+    expected_width = _maybe_int(form_data.get("width"))
+    expected_height = _maybe_int(form_data.get("height"))
+    expected_fps = _maybe_int(form_data.get("fps"))
+
+    for vid_bytes in response.videos:
+        assert_video_valid(
+            vid_bytes,
+            num_frames=expected_frames,
+            width=expected_width,
+            height=expected_height,
+            fps=expected_fps,
+        )
+
+
+def assert_audio_diffusion_response(
+    response,
+    request_config: dict[str, Any],
+    run_level: str = None,
+) -> None:
+    """
+    Validate audio diffusion response.
+    """
+    raise NotImplementedError("Audio validation is not implemented yet")
+    # consider using assert_audio_valid defined above
+
+
+def _maybe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
 def assert_image_valid(image: Path | Image.Image, *, width: int | None = None, height: int | None = None):
     """Assert the file is a loadable image with optional exact dimensions."""
     if isinstance(image, Path):
@@ -132,7 +228,7 @@ def assert_video_valid(
 
         # Validate against expectations
         if num_frames is not None:
-            expected_num_frames = ((num_frames + 3) // 4) * 4 + 1
+            expected_num_frames = (num_frames // 4) * 4 + 1
             assert actual_num_frames == expected_num_frames, (
                 f"Frame count mismatch: expected {num_frames}, got {actual_num_frames}"
             )
@@ -1412,12 +1508,12 @@ def assert_diffusion_response(response: DiffusionResponse, request_config: dict[
     """
     Validate diffusion response results.
 
+    Dispatcher that routes validation to modality-specific assert functions.
+
     Args:
-        response: DiffusionResponse object. Any not-None content will be validated based on the request_config.
-        request_config: Request configuration dictionary containing parameters like model, messages, extra_body.
-            When validating a certain modality, the corresponding params in request_config['extra_body'] must present.
-            It will be used to check against the multimedia file in the response.
-        run_level: Test run level (e.g., "core_model", "advanced_model")
+        response: DiffusionResponse object.
+        request_config: Request configuration dictionary.
+        run_level: Test run level (e.g. "core_model", "advanced_model")
 
     Raises:
         AssertionError: When the response does not meet validation criteria
@@ -1429,33 +1525,29 @@ def assert_diffusion_response(response: DiffusionResponse, request_config: dict[
     if e2e_latency is not None:
         print(f"the avg e2e is: {e2e_latency}")
 
-    extra_body = request_config.get("extra_body", {})
-
-    num_outputs_per_prompt = extra_body.get("num_outputs_per_prompt", 1)
+    has_any_content = any(content is not None for content in (response.images, response.videos, response.audios))
+    assert has_any_content, "Response contains no images, videos, or audios"
 
     if response.images is not None:
-        assert len(response.images) > 0, "No images in response"
-        assert len(response.images) == num_outputs_per_prompt, (
-            f"Expected {num_outputs_per_prompt} images, got {len(response.images)}"
+        assert_image_diffusion_response(
+            response=response,
+            request_config=request_config,
+            run_level=run_level,
         )
-        if run_level == "advanced_model":
-            expected_width = extra_body["width"]  # intend to raise KeyError
-            expected_height = extra_body["height"]  # intend to raise KeyError
-            for img in response.images:
-                assert_image_valid(img, width=expected_width, height=expected_height)
+
     if response.videos is not None:
-        expected_frames = extra_body.get("num_frames")
-        expected_width = extra_body.get("width")
-        expected_height = extra_body.get("height")
-        expected_fps = extra_body.get("fps")
-        for vid_bytes in response.videos:
-            assert_video_valid(
-                vid_bytes, num_frames=expected_frames, width=expected_width, height=expected_height, fps=expected_fps
-            )
+        assert_video_diffusion_response(
+            response=response,
+            request_config=request_config,
+            run_level=run_level,
+        )
+
     if response.audios is not None:
-        raise NotImplementedError(
-            "Audio validation is not implemented yet"
-        )  # consider using assert_audio_valid defined above
+        assert_audio_diffusion_response(
+            response=response,
+            request_config=request_config,
+            run_level=run_level,
+        )
 
 
 class OpenAIClientHandler:
@@ -1712,190 +1804,163 @@ class OpenAIClientHandler:
         stream = request_config.get("stream", False)
         modalities = request_config.get("modalities", omit)  # Most diffusion models don't require modalities param
         extra_body = request_config.get("extra_body", None)
-        messages = request_config.get("messages")
 
         if stream:
             raise NotImplementedError("Streaming is not currently implemented for diffusion model e2e test")
 
-        if extra_body.get("num_frames", None):  # videos
-            sys_prompt, user_prompt, vids, imgs, auds = extract_params_from_messages(messages)
+        if request_num == 1:
+            # Send single request
+            chat_completion = self.client.chat.completions.create(
+                model=request_config.get("model"),
+                messages=request_config.get("messages"),
+                extra_body=extra_body,
+                modalities=modalities,
+            )
 
-            form_data = {
-                "prompt": user_prompt,
-                "negative_prompt": extra_body.get("negative_prompt", ""),
-                "width": str(extra_body.get("width", 512)),
-                "height": str(extra_body.get("height", 512)),
-                "num_frames": str(extra_body.get("num_frames", 8)),
-                "fps": str(extra_body.get("fps", 8)),
-                "num_inference_steps": str(extra_body.get("num_inference_steps", 2)),
-                "guidance_scale": str(extra_body.get("guidance_scale", 4.0)),
-                "seed": str(extra_body.get("seed", 42)),
-            }
+            response = self._process_diffusion_response(chat_completion)
+            assert_diffusion_response(response, request_config, run_level=self.run_level)
+            responses.append(response)
 
-            files = {}
-            if imgs:
-                img_url = imgs[-1]
-                if img_url.startswith("data:image"):
-                    _, encoded = img_url.split(",", 1)
-                    file_data = base64.b64decode(encoded)
-                    files["input_reference"] = ("reference.jpg", BytesIO(file_data), "image/jpeg")
-                else:
-                    form_data["image_reference"] = json.dumps({"image_url": img_url})
+        else:
+            # Send concurrent requests
+            with concurrent.futures.ThreadPoolExecutor(max_workers=request_num) as executor:
+                futures = []
 
-            if "boundary_ratio" in extra_body:
-                form_data["boundary_ratio"] = str(extra_body["boundary_ratio"])
-            if "flow_shift" in extra_body:
-                form_data["flow_shift"] = str(extra_body["flow_shift"])
+                # Submit all request tasks
+                for _ in range(request_num):
+                    future = executor.submit(
+                        self.client.chat.completions.create,
+                        model=request_config.get("model"),
+                        messages=request_config.get("messages"),
+                        modalities=modalities,
+                        extra_body=extra_body,
+                    )
+                    futures.append(future)
 
-            result = DiffusionResponse()
-            start_time = time.perf_counter()
-
-            try:
-                # create_and_poll includes (POST /v1/videos) and poll req (GET /v1/videos/{video_id})
-                create_url = f"{self.base_url}//v1/videos"
-                response = requests.post(
-                    create_url, data=form_data, files=files, headers={"Accept": "application/json"}
-                )
-                response.raise_for_status()
-                job_data = response.json()
-                video_id = job_data["id"]
-
-                while True:
-                    status_url = f"{self.base_url}/v1/videos/{video_id}"
-                    status_resp = requests.get(status_url)
-                    status_data = status_resp.json()
-                    current_status = status_data["status"]
-
-                    if current_status == "completed":
-                        break
-                    elif current_status == "failed":
-                        error_msg = status_data.get("last_error", "Unknown error")
-                        raise RuntimeError(f"Job failed: {error_msg}")
-
-                    time.sleep(2)
-
-                download_url = f"{self.base_url}/v1/videos/{video_id}/content"
-                video_resp = requests.get(download_url, stream=True)
-                video_resp.raise_for_status()
-
-                video_bytes = BytesIO()
-                for chunk in video_resp.iter_content(chunk_size=8192):
-                    video_bytes.write(chunk)
-                video_bytes.seek(0)
-
-                result.success = True
-                result.videos = [video_bytes.getvalue()]
-                result.e2e_latency = time.perf_counter() - start_time
-
-                assert_diffusion_response(result, request_config, run_level=self.run_level)
-
-            except Exception as e:
-                result.success = False
-                result.error_message = f"Diffusion response processing error: {str(e)}"
-
-            responses.append(result)
-
-        else:  # images
-            if request_num == 1:
-                # Send single request
-                chat_completion = self.client.chat.completions.create(
-                    model=request_config.get("model"),
-                    messages=messages,
-                    extra_body=extra_body,
-                    modalities=modalities,
-                )
-
-                response = self._process_diffusion_response(chat_completion)
-                assert_diffusion_response(response, request_config, run_level=self.run_level)
-                responses.append(response)
-
-            else:
-                # Send concurrent requests
-                with concurrent.futures.ThreadPoolExecutor(max_workers=request_num) as executor:
-                    futures = []
-
-                    # Submit all request tasks
-                    for _ in range(request_num):
-                        future = executor.submit(
-                            self.client.chat.completions.create,
-                            model=request_config.get("model"),
-                            messages=messages,
-                            modalities=modalities,
-                            extra_body=extra_body,
-                        )
-                        futures.append(future)
-
-                    # Process completed tasks
-                    for future in concurrent.futures.as_completed(futures):
-                        chat_completion = future.result()
-                        response = self._process_diffusion_response(chat_completion)
-                        assert_diffusion_response(response, request_config, run_level=self.run_level)
-                        responses.append(response)
+                # Process completed tasks
+                for future in concurrent.futures.as_completed(futures):
+                    chat_completion = future.result()
+                    response = self._process_diffusion_response(chat_completion)
+                    assert_diffusion_response(response, request_config, run_level=self.run_level)
+                    responses.append(response)
 
         return responses
 
+    def send_video_diffusion_request(self, request_config: dict[str, Any], request_num: int = 1) -> list[OmniResponse]:
+        """
+        Send native /v1/videos requests.
+        """
+        if request_num != 1:
+            raise NotImplementedError("Concurrent video diffusion requests are not currently implemented")
 
-def extract_params_from_messages(
-    messages: list[dict[str, Any]],
-) -> tuple[
-    str | None,  # system_prompt_content
-    str,  # user_prompt_text
-    list[str],  # video_urls
-    list[str],  # image_urls
-    list[str],  # audio_urls
-]:
-    system_prompt = None
-    user_prompt_parts = []
-    video_urls, image_urls, audio_urls = [], [], []
+        if request_config.get("stream", False):
+            raise NotImplementedError("Streaming is not currently implemented for video diffusion e2e test")
 
-    # extract system_prompt
-    for msg in messages:
-        if msg.get("role") == "system":
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                system_prompt = content
-            elif isinstance(content, list):
-                system_prompt = " ".join(
-                    item["text"] for item in content if isinstance(item, dict) and item.get("type") == "text"
+        form_data = request_config.get("form_data")
+        if not isinstance(form_data, dict):
+            raise ValueError("Video request_config must contain 'form_data'")
+
+        if not form_data.get("prompt"):
+            raise ValueError("Video request_config['form_data'] must contain 'prompt'")
+
+        normalized_form_data = {key: str(value) for key, value in form_data.items() if value is not None}
+
+        files: dict[str, tuple[str, BytesIO, str]] = {}
+        image_reference = request_config.get("image_reference")
+        if image_reference:
+            if image_reference.startswith("data:image"):
+                header, encoded = image_reference.split(",", 1)
+                content_type = header.split(";")[0].removeprefix("data:")
+                extension = content_type.split("/")[-1]
+                file_data = base64.b64decode(encoded)
+
+                files["input_reference"] = (
+                    f"reference.{extension}",
+                    BytesIO(file_data),
+                    content_type,
                 )
-            break
+            else:
+                normalized_form_data["image_reference"] = json.dumps({"image_url": image_reference})
 
-    # extract latest user message
-    user_msg = next((msg for msg in reversed(messages) if msg.get("role") == "user"), None)
-    if not user_msg:
-        return system_prompt, "", video_urls, image_urls, audio_urls
+        result = DiffusionResponse()
+        start_time = time.perf_counter()
 
-    content = user_msg.get("content", "")
+        try:
+            create_url = self._build_url("/v1/videos")
+            response = requests.post(
+                create_url,
+                data=normalized_form_data,
+                files=files,
+                headers={"Accept": "application/json"},
+                timeout=60,
+            )
+            response.raise_for_status()
 
-    if isinstance(content, str):
-        return system_prompt, content, video_urls, image_urls, audio_urls
+            job_data = response.json()
+            video_id = job_data["id"]
 
-    if not isinstance(content, list):
-        raise ValueError(f"Unexpected content type: {type(content)}")
+            self._wait_until_video_completed(video_id)
 
-    for item in content:
-        if not isinstance(item, dict):
-            continue
+            video_content = self._download_video_content(video_id)
 
-        item_type = item.get("type", "")
+            result.success = True
+            result.videos = [video_content]
+            result.e2e_latency = time.perf_counter() - start_time
 
-        if item_type == "text" and "text" in item:
-            user_prompt_parts.append(item["text"])
+            assert_diffusion_response(result, request_config, run_level=self.run_level)
 
-        elif item_type in ("video_url", "image_url", "audio_url"):
-            media_key = item_type
-            media_obj = item.get(media_key, {})
-            if isinstance(media_obj, dict) and "url" in media_obj:
-                url = media_obj["url"]
-                if url:
-                    if item_type == "video_url":
-                        video_urls.append(url)
-                    elif item_type == "image_url":
-                        image_urls.append(url)
-                    elif item_type == "audio_url":
-                        audio_urls.append(url)
+        except Exception as e:
+            result.success = False
+            result.error_message = f"Diffusion response processing error: {e}"
+            assert False, result.error_message
 
-    return (system_prompt, " ".join(user_prompt_parts).strip(), video_urls, image_urls, audio_urls)
+        return [result]
+
+    def _wait_until_video_completed(
+        self,
+        video_id: str,
+        poll_interval_seconds: int = 2,
+        timeout_seconds: int = 300,
+    ) -> None:
+        status_url = self._build_url(f"/v1/videos/{video_id}")
+        deadline = time.monotonic() + timeout_seconds
+
+        while time.monotonic() < deadline:
+            status_resp = requests.get(
+                status_url,
+                headers={"Accept": "application/json"},
+                timeout=30,
+            )
+            status_resp.raise_for_status()
+
+            status_data = status_resp.json()
+            current_status = status_data["status"]
+
+            if current_status == "completed":
+                return
+
+            if current_status == "failed":
+                error_msg = status_data.get("last_error", "Unknown error")
+                raise RuntimeError(f"Job failed: {error_msg}")
+
+            time.sleep(poll_interval_seconds)
+
+        raise TimeoutError(f"Video job {video_id} did not complete within {timeout_seconds}s")
+
+    def _download_video_content(self, video_id: str) -> bytes:
+        download_url = self._build_url(f"/v1/videos/{video_id}/content")
+        video_resp = requests.get(download_url, stream=True, timeout=60)
+        video_resp.raise_for_status()
+
+        video_bytes = BytesIO()
+        for chunk in video_resp.iter_content(chunk_size=8192):
+            if chunk:
+                video_bytes.write(chunk)
+
+        return video_bytes.getvalue()
+
+    def _build_url(self, path: str) -> str:
+        return f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
 @pytest.fixture
