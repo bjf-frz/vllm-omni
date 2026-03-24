@@ -203,9 +203,11 @@ class AsyncOmniEngine:
         engine_args: OmniEngineArgs | None = None,
         stage_init_timeout: int = 300,
         init_timeout: int = 600,
+        diffusion_batch_size: int = 1,
         **kwargs: Any,
     ) -> None:
         self.model = model
+        self.diffusion_batch_size = diffusion_batch_size
         startup_timeout = int(init_timeout)
 
         logger.info(f"[AsyncOmniEngine] Initializing with model {model}")
@@ -473,8 +475,17 @@ class AsyncOmniEngine:
 
                             inject_omni_kv_config(stage_cfg, omni_conn_cfg, omni_from, omni_to)
                         _inject_kv_stage_info(stage_cfg, stage_id)
-                        stage_clients[stage_id] = initialize_diffusion_stage(self.model, stage_cfg, metadata)
-                        logger.info("[AsyncOmniEngine] Stage %s initialized (diffusion)", stage_id)
+                        stage_clients[stage_id] = initialize_diffusion_stage(
+                            self.model,
+                            stage_cfg,
+                            metadata,
+                            batch_size=self.diffusion_batch_size,
+                        )
+                        logger.info(
+                            "[AsyncOmniEngine] Stage %s initialized (diffusion, batch_size=%d)",
+                            stage_id,
+                            self.diffusion_batch_size,
+                        )
                         continue
 
                     llm_stage_ids.append(stage_id)
@@ -791,6 +802,7 @@ class AsyncOmniEngine:
         if parallel_config is None:
             ulysses_degree = normalized_kwargs.get("ulysses_degree") or 1
             ring_degree = normalized_kwargs.get("ring_degree") or 1
+            ulysses_mode = normalized_kwargs.get("ulysses_mode") or "strict"
             sequence_parallel_size = normalized_kwargs.get("sequence_parallel_size")
             tensor_parallel_size = normalized_kwargs.get("tensor_parallel_size") or 1
             cfg_parallel_size = normalized_kwargs.get("cfg_parallel_size") or 1
@@ -808,6 +820,7 @@ class AsyncOmniEngine:
                 sequence_parallel_size=sequence_parallel_size,
                 ulysses_degree=ulysses_degree,
                 ring_degree=ring_degree,
+                ulysses_mode=ulysses_mode,
                 cfg_parallel_size=cfg_parallel_size,
                 vae_patch_parallel_size=vae_patch_parallel_size,
                 use_hsdp=use_hsdp,
