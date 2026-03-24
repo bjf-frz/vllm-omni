@@ -1710,12 +1710,15 @@ class OpenAIClientHandler:
                     content = choice.message.content
                     if isinstance(content, list):
                         for item in content:
-                            if hasattr(item, "image_url") and item.image_url is not None:
-                                image_url = item.image_url.url
-                                if image_url.startswith("data:image"):
-                                    b64_data = image_url.split(",", 1)[1]
-                                    img = decode_b64_image(b64_data)
-                                    images.append(img)
+                            if isinstance(item, dict):
+                                image_url = item.get("image_url", {}).get("url")
+                            else:
+                                image_url_obj = getattr(item, "image_url", None)
+                                image_url = hasattr(image_url_obj, "url", None) if image_url_obj else None
+                            if image_url and image_url.startswith("data:image"):
+                                b64_data = image_url.split(",", 1)[1]
+                                img = decode_b64_image(b64_data)
+                                images.append(img)
 
             result.e2e_latency = time.perf_counter() - start_time
             result.images = images if images else None
