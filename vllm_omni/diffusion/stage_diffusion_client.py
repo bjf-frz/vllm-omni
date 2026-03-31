@@ -11,6 +11,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_omni.diffusion.data import DiffusionRequestAbortedError
 from vllm_omni.engine.stage_init_utils import StageMetadata
@@ -51,6 +52,16 @@ class StageDiffusionClient:
         self._engine = AsyncOmniDiffusion(model=model, od_config=od_config, batch_size=batch_size)
         self._output_queue: asyncio.Queue[OmniRequestOutput] = asyncio.Queue()
         self._tasks: dict[str, asyncio.Task] = {}
+        self._engine_dead: bool = False
+        self._dead_error: BaseException | None = None
+
+        executor = getattr(self._engine.engine, "executor", None)
+        if executor is not None and hasattr(executor, "register_failure_callback"):
+            executor.register_failure_callback(
+                lambda: self._set_engine_dead(
+                    RuntimeError("Diffusion worker process died"),
+                )
+            )
 
         logger.info("[StageDiffusionClient] Stage-%s initialized (batch_size=%d)", self.stage_id, batch_size)
 
@@ -60,6 +71,8 @@ class StageDiffusionClient:
         prompt: OmniPromptType,
         sampling_params: OmniDiffusionSamplingParams,
     ) -> None:
+        if self._engine_dead:
+            raise EngineDeadError()
         task = asyncio.create_task(
             self._run(request_id, prompt, sampling_params),
             name=f"diffusion-{request_id}",
@@ -85,10 +98,15 @@ class StageDiffusionClient:
         except DiffusionRequestAbortedError as e:
             logger.info(
                 "[StageDiffusionClient] Stage-%s req=%s aborted: %s",
+        except EngineDeadError as e:
+            logger.error(
+                "[StageDiffusionClient] Stage-%s req=%s engine dead: %s",
                 self.stage_id,
                 request_id,
                 e,
             )
+            self._set_engine_dead(e)
+            await self._output_queue.put(OmniRequestOutput.from_error(request_id, str(e)))
         except Exception as e:
             logger.exception(
                 "[StageDiffusionClient] Stage-%s req=%s failed: %s",
@@ -96,6 +114,7 @@ class StageDiffusionClient:
                 request_id,
                 e,
             )
+            await self._output_queue.put(OmniRequestOutput.from_error(request_id, str(e)))
         finally:
             self._tasks.pop(request_id, None)
 
@@ -107,6 +126,8 @@ class StageDiffusionClient:
         prompts: list[OmniPromptType],
         sampling_params: OmniDiffusionSamplingParams,
     ) -> None:
+        if self._engine_dead:
+            raise EngineDeadError()
         """Submit a list of prompts as a single batched engine call.
 
         All prompts are processed in one ``DiffusionEngine.step()`` call
@@ -132,6 +153,15 @@ class StageDiffusionClient:
                 request_id,
             )
             await self._output_queue.put(result)
+        except EngineDeadError as e:
+            logger.error(
+                "[StageDiffusionClient] Stage-%s batch req=%s engine dead: %s",
+                self.stage_id,
+                request_id,
+                e,
+            )
+            self._set_engine_dead(e)
+            await self._output_queue.put(OmniRequestOutput.from_error(request_id, str(e)))
         except Exception as e:
             logger.exception(
                 "[StageDiffusionClient] Stage-%s batch req=%s failed: %s",
@@ -139,6 +169,7 @@ class StageDiffusionClient:
                 request_id,
                 e,
             )
+            await self._output_queue.put(OmniRequestOutput.from_error(request_id, str(e)))
         finally:
             self._tasks.pop(request_id, None)
 
@@ -213,6 +244,25 @@ class StageDiffusionClient:
             kwargs,
             None,
         )
+
+    def _set_engine_dead(self, exc: BaseException) -> None:
+        """Mark this client as fatally failed.  Idempotent."""
+        if not self._engine_dead:
+            logger.error(
+                "[StageDiffusionClient] Stage-%s marked dead: %s",
+                self.stage_id,
+                exc,
+            )
+            self._engine_dead = True
+            self._dead_error = exc
+
+    def check_health(self) -> None:
+        """Raise ``EngineDeadError`` if the diffusion engine is dead.
+
+        Mirrors the ``check_health`` protocol on vLLM's ``EngineClient``.
+        """
+        if self._engine_dead:
+            raise EngineDeadError()
 
     def shutdown(self) -> None:
         for task in self._tasks.values():

@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import queue
 import threading
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import torch
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
@@ -55,6 +57,8 @@ def _make_executor(num_gpus: int = 1):
     executor._result_mq = mock_rmq
     executor._closed = False
     executor._processes = []
+    executor.is_failed = False
+    executor._failure_callbacks = []
     return executor, req_q, res_q
 
 
@@ -432,3 +436,158 @@ class TestCollectiveRpcTimeoutWhileLockHeld:
         t.join(5)
 
         assert result.error == "ok"
+
+
+# ───────── error handling: EngineDeadError propagation through layers ─────
+
+
+class TestMultiprocExecutorRaisesEngineDeadError:
+    """Executor raises ``EngineDeadError`` when workers have died."""
+
+    def test_add_req_raises_when_is_failed(self):
+        executor = object.__new__(MultiprocDiffusionExecutor)
+        executor._closed = False
+        executor._result_mq = MagicMock()
+        executor.is_failed = True
+
+        with pytest.raises(EngineDeadError):
+            executor.add_req(MagicMock())
+
+    def test_add_req_raises_mid_dequeue_when_is_failed(self):
+        """Worker dies while we are polling the dequeue loop."""
+        executor, _, res_q = _make_executor()
+
+        call_count = 0
+        orig_dequeue = executor._result_mq.dequeue
+
+        def _dying_dequeue(timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                executor.is_failed = True
+                raise TimeoutError
+            return orig_dequeue(timeout=timeout)
+
+        executor._result_mq.dequeue = _dying_dequeue
+
+        with pytest.raises(EngineDeadError):
+            executor.add_req(MagicMock())
+
+
+class TestExecutorFailureCallback:
+    """``register_failure_callback`` fires when ``is_failed`` is set by the
+    worker monitor."""
+
+    def test_callback_invoked(self):
+        executor, _, _ = _make_executor()
+        called = threading.Event()
+        executor.register_failure_callback(lambda: called.set())
+
+        # Simulate what the worker monitor does.
+        executor.is_failed = True
+        for cb in executor._failure_callbacks:
+            cb()
+
+        assert called.is_set()
+
+
+class TestDiffusionEngineDeadErrorPassthrough:
+    """``DiffusionEngine.add_req_and_wait_for_response`` re-raises
+    ``EngineDeadError`` from executor and wraps other errors."""
+
+    def test_engine_dead_error_propagates(self):
+        engine, executor, _, _ = _make_engine()
+        executor.add_req = Mock(side_effect=EngineDeadError())
+
+        with pytest.raises(EngineDeadError):
+            engine.add_req_and_wait_for_response(_mock_request("dead"))
+
+    def test_runtime_error_wrapped_in_output(self):
+        engine, executor, _, _ = _make_engine()
+        executor.add_req = Mock(side_effect=RuntimeError("gpu fault"))
+
+        out = engine.add_req_and_wait_for_response(_mock_request("fault"))
+        assert isinstance(out, DiffusionOutput)
+        assert "gpu fault" in out.error
+
+
+class TestStageDiffusionClientErrorPropagation:
+    """Error surface behaviour of ``StageDiffusionClient``.
+
+    Mocks the heavy AsyncOmniDiffusion engine so tests run without GPU.
+    """
+
+    def _make_client(self):
+        from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
+
+        client = object.__new__(StageDiffusionClient)
+        client.stage_id = 0
+        client.final_output = True
+        client.final_output_type = "image"
+        client.default_sampling_params = None
+        client.custom_process_input_func = None
+        client.engine_input_source = None
+
+        client._engine = MagicMock()
+        client._engine.generate = AsyncMock()
+        client._output_queue = asyncio.Queue()
+        client._tasks = {}
+        client._engine_dead = False
+        client._dead_error = None
+
+        return client
+
+    @pytest.mark.asyncio
+    async def test_recoverable_error_queued_without_setting_dead(self):
+        client = self._make_client()
+        client._engine.generate.side_effect = RuntimeError("model crashed")
+
+        await client._run("req-1", "test prompt", None)
+
+        out = client._output_queue.get_nowait()
+        assert out.error is not None
+        assert "model crashed" in out.error
+        assert client._engine_dead is False
+
+    @pytest.mark.asyncio
+    async def test_engine_generate_error_queued_without_setting_dead(self):
+        """EngineGenerateError is recoverable -- error output queued, engine
+        stays alive."""
+        client = self._make_client()
+        client._engine.generate.side_effect = EngineGenerateError()
+
+        await client._run("req-gen", "test prompt", None)
+
+        out = client._output_queue.get_nowait()
+        assert out.error is not None
+        assert client._engine_dead is False
+
+    @pytest.mark.asyncio
+    async def test_engine_dead_error_sets_dead_flag(self):
+        client = self._make_client()
+        client._engine.generate.side_effect = EngineDeadError()
+
+        await client._run("req-2", "test prompt", None)
+
+        assert client._engine_dead is True
+        out = client._output_queue.get_nowait()
+        assert out.error is not None
+
+    @pytest.mark.asyncio
+    async def test_add_request_raises_when_dead(self):
+        client = self._make_client()
+        client._engine_dead = True
+
+        with pytest.raises(EngineDeadError):
+            await client.add_request_async("req-3", "test prompt", None)
+
+    def test_check_health_raises_when_dead(self):
+        client = self._make_client()
+        client._engine_dead = True
+
+        with pytest.raises(EngineDeadError):
+            client.check_health()
+
+    def test_check_health_ok_when_alive(self):
+        client = self._make_client()
+        client.check_health()

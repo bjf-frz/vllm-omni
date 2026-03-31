@@ -136,6 +136,9 @@ class OmniBase:
     def check_health(self) -> None:
         if not self.engine.is_alive():
             raise EngineDeadError("Orchestrator process is not alive")
+        for stage_client in self.engine.stage_clients:
+            if hasattr(stage_client, "check_health"):
+                stage_client.check_health()
 
     def resolve_sampling_params_list(
         self,
@@ -206,7 +209,10 @@ class OmniBase:
             return True, None, None, None
 
         if msg_type == "error":
-            raise RuntimeError(msg.get("error", "Orchestrator returned an error message"))
+            error_text = msg.get("error", "Orchestrator returned an error message")
+            if msg.get("fatal"):
+                raise EngineDeadError(error_text)
+            raise RuntimeError(error_text)
 
         if msg_type != "output":
             logger.warning("[%s] got unexpected msg type: %s", self.__class__.__name__, msg_type)

@@ -19,7 +19,7 @@ from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import SupportedTask
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 from vllm_omni.entrypoints.client_request_state import ClientRequestState
 from vllm_omni.entrypoints.omni_base import OmniBase
@@ -299,6 +299,19 @@ class AsyncOmni(EngineClient, OmniBase):
                 )
                 raise RuntimeError(result)
 
+            engine_outputs = result.get("engine_outputs")
+            error_text = getattr(engine_outputs, "error", None)
+            if error_text is not None:
+                logger.error(
+                    "[AsyncOmni] Stage error for req=%s stage-%s: %s",
+                    request_id,
+                    stage_id,
+                    error_text,
+                )
+                if self.errored:
+                    raise EngineDeadError(error_text)
+                raise EngineGenerateError() from RuntimeError(f"Stage {stage_id} error: {error_text}")
+
             # Process the result (constructs OmniRequestOutput)
             output_to_yield = self._process_single_result(
                 result,
@@ -355,6 +368,11 @@ class AsyncOmni(EngineClient, OmniBase):
 
             except asyncio.CancelledError:
                 raise
+            except EngineDeadError as e:
+                logger.error("[AsyncOmni] Engine dead: %s", e)
+                for req_state in list(self.request_states.values()):
+                    error_msg = {"request_id": req_state.request_id, "error": str(e)}
+                    await req_state.queue.put(error_msg)
             except Exception as e:
                 logger.exception("[AsyncOmni] final_output_loop failed.")
                 for req_state in list(self.request_states.values()):
@@ -578,8 +596,18 @@ class AsyncOmni(EngineClient, OmniBase):
 
     @property
     def errored(self) -> bool:
-        """Whether orchestrator thread has stopped unexpectedly."""
-        return not self.engine.is_alive()
+        """Whether the engine is in a non-recoverable error state.
+
+        Mirrors vLLM's ``AsyncLLM.errored``.  True when the orchestrator
+        thread is dead **or** any stage client has been marked dead (e.g.
+        diffusion worker OOM / process death).
+        """
+        if not self.engine.is_alive():
+            return True
+        for stage_client in self.engine.stage_clients:
+            if getattr(stage_client, "_engine_dead", False):
+                return True
+        return False
 
     @property
     def is_stopped(self) -> bool:

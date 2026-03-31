@@ -603,13 +603,17 @@ class AsyncOmniEngine:
             loop.run_until_complete(_run_orchestrator())
         except Exception as e:
             if not startup_future.done():
-                startup_future.set_exception(RuntimeError(f"Orchestrator initialization failed: {e}"))
+                wrapped = RuntimeError(f"Orchestrator initialization failed: {e}")
+                wrapped.__cause__ = e
+                startup_future.set_exception(wrapped)
             logger.exception("[AsyncOmniEngine] Orchestrator thread crashed")
+            error_text = str(e) or "Orchestrator thread crashed"
             try:
+                error_msg = {"type": "error", "error": error_text, "fatal": True}
                 if self.output_queue is not None:
-                    self.output_queue.sync_q.put_nowait({"type": "error", "error": "Orchestrator thread crashed"})
+                    self.output_queue.sync_q.put_nowait(error_msg)
                 if self.rpc_output_queue is not None:
-                    self.rpc_output_queue.sync_q.put_nowait({"type": "error", "error": "Orchestrator thread crashed"})
+                    self.rpc_output_queue.sync_q.put_nowait(error_msg)
             except Exception:
                 pass
             raise

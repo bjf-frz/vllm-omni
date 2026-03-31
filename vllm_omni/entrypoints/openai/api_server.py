@@ -80,6 +80,7 @@ from vllm.tasks import POOLING_TASKS
 from vllm.tool_parsers import ToolParserManager
 from vllm.utils import random_uuid
 from vllm.utils.system_utils import decorate_logs
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.openai.errors import InvalidInputReferenceError
@@ -851,6 +852,8 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         return base_server.create_error_response(message="The model does not support Chat Completions API")
     try:
         generator = await handler.create_chat_completion(request, raw_request)
+    except (EngineGenerateError, EngineDeadError):
+        raise
     except Exception as e:
         logger.exception("Chat completion failed: %s", e)
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
@@ -946,6 +949,8 @@ async def create_speech(request: OpenAICreateSpeechRequest, raw_request: Request
                 status_code=result.error.code if result.error else 400,
             )
         return result
+    except (EngineGenerateError, EngineDeadError):
+        raise
     except Exception as e:
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
 
@@ -980,6 +985,8 @@ async def create_speech_batch(request: BatchSpeechRequest, raw_request: Request)
                 status_code=result.error.code if result.error else 400,
             )
         return JSONResponse(content=result.model_dump())
+    except (EngineGenerateError, EngineDeadError):
+        raise
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value, detail=str(e)) from e
     except Exception as e:
@@ -1173,29 +1180,28 @@ _remove_route_from_router(router, "/health")
 async def health(raw_request: Request) -> JSONResponse:
     """Health check endpoint that works for both LLM and diffusion modes.
 
-    Returns 200 OK if the server is healthy.
-    For LLM mode: delegates to engine_client health check
-    For diffusion mode: checks if diffusion_engine is running
+    Returns 200 OK if the server is healthy, 503 if the engine is dead.
+    Mirrors vLLM upstream's /health which catches EngineDeadError -> 503.
     """
-    # Check if we're in diffusion mode
-    diffusion_engine = getattr(raw_request.app.state, "diffusion_engine", None)
-    if diffusion_engine is not None:
-        # Diffusion mode health check
-        if hasattr(diffusion_engine, "is_running") and diffusion_engine.is_running:
-            return JSONResponse(content={"status": "healthy"})
+    engine_client = getattr(raw_request.app.state, "engine_client", None) or getattr(
+        raw_request.app.state, "diffusion_engine", None
+    )
+    if engine_client is None:
         return JSONResponse(
-            content={"status": "unhealthy", "reason": "Diffusion engine is not running"},
+            content={"status": "unhealthy", "reason": "No engine initialized"},
             status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
         )
 
-    # LLM mode - delegate to engine_client
-    engine_client = getattr(raw_request.app.state, "engine_client", None)
-    if engine_client is not None:
+    try:
         await engine_client.check_health()
         return JSONResponse(content={"status": "healthy"})
-
+    except EngineDeadError:
+        return JSONResponse(
+            content={"status": "unhealthy"},
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+        )
     return JSONResponse(
-        content={"status": "unhealthy", "reason": "No engine initialized"},
+        content={"status": "unhealthy"},
         status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
     )
 
@@ -1327,7 +1333,8 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
         )
 
     except HTTPException:
-        # Re-raise HTTPExceptions as-is
+        raise
+    except (EngineGenerateError, EngineDeadError):
         raise
     except ValueError as e:
         logger.error(f"Validation error: {e}")
@@ -1541,7 +1548,8 @@ async def edit_images(
         )
 
     except HTTPException:
-        # Re-raise HTTPExceptions as-is
+        raise
+    except (EngineGenerateError, EngineDeadError):
         raise
     except ValueError as e:
         logger.error(f"Validation error: {e}")

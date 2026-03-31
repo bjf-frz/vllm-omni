@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import multiprocessing.connection
+import threading
 import time
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import zmq
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.logger import init_logger
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_omni.diffusion.data import SHUTDOWN_MESSAGE, DiffusionOutput
 from vllm_omni.diffusion.executor.abstract import DiffusionExecutor
@@ -21,6 +25,8 @@ if TYPE_CHECKING:
     from vllm_omni.diffusion.worker.utils import RunnerOutput
 
 logger = init_logger(__name__)
+
+_DEQUEUE_TIMEOUT_S = 5.0
 
 
 @dataclass
@@ -63,6 +69,8 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
     def _init_executor(self) -> None:
         self._processes: list[mp.Process] = []
         self._closed = False
+        self.is_failed = False
+        self._failure_callbacks: list[Callable[[], None]] = []
 
         num_workers = self.od_config.num_gpus
         self._broadcast_mq = self._init_broadcast_queue(num_workers)
@@ -80,6 +88,8 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
             processes=self._processes,
         )
         self._finalizer = weakref.finalize(self, self.resources)
+
+        self.start_worker_monitor()
 
     def _init_broadcast_queue(self, num_workers: int) -> MessageQueue:
         return MessageQueue(
@@ -164,8 +174,56 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
 
         return processes, result_handle
 
+    def start_worker_monitor(self) -> None:
+        """Start a daemon thread that watches for unexpected worker death.
+
+        Mirrors ``vllm.executor.multiproc_executor.MultiprocExecutor
+        .start_worker_monitor()``.
+        """
+        sentinels = [p.sentinel for p in self._processes]
+        if not sentinels:
+            return
+
+        def _monitor() -> None:
+            try:
+                finished = multiprocessing.connection.wait(sentinels)
+            except OSError:
+                return
+
+            if self._closed:
+                return
+
+            dead = [p.name for p in self._processes if p.sentinel in finished and not p.is_alive()]
+            if dead:
+                logger.error(
+                    "Diffusion worker(s) died unexpectedly: %s",
+                    dead,
+                )
+
+            self.is_failed = True
+            self.shutdown()
+
+            for cb in self._failure_callbacks:
+                try:
+                    cb()
+                except Exception:
+                    logger.exception("failure_callback raised")
+
+        t = threading.Thread(target=_monitor, daemon=True, name="diffusion-worker-monitor")
+        t.start()
+
+    def register_failure_callback(
+        self,
+        callback: Callable[[], None],
+    ) -> None:
+        """Register a callback invoked when a worker process dies."""
+        self._failure_callbacks.append(callback)
+
     def add_req(self, request: OmniDiffusionRequest) -> DiffusionOutput:
         self._ensure_open()
+        if self.is_failed:
+            raise EngineDeadError()
+
         rpc_request = {
             "type": "rpc",
             "method": "generate",
@@ -177,7 +235,17 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
 
         try:
             self._broadcast_mq.enqueue(rpc_request)
-            response = self._result_mq.dequeue()
+
+            while True:
+                if self.is_failed:
+                    raise EngineDeadError()
+                try:
+                    response = self._result_mq.dequeue(
+                        timeout=_DEQUEUE_TIMEOUT_S,
+                    )
+                    break
+                except (TimeoutError, zmq.error.Again):
+                    continue
 
             try:
                 unpack_diffusion_output_shm(response)
@@ -314,10 +382,12 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
             raise
 
     def check_health(self) -> None:
-        # Simple check if processes are alive
+        if self.is_failed:
+            raise EngineDeadError()
         for p in self._processes:
             if not p.is_alive():
-                raise RuntimeError(f"Worker process {p.name} is dead")
+                self.is_failed = True
+                raise EngineDeadError(f"Worker process {p.name} is dead")
 
     def shutdown(self) -> None:
         self._closed = True
