@@ -985,8 +985,6 @@ async def create_speech_batch(request: BatchSpeechRequest, raw_request: Request)
                 status_code=result.error.code if result.error else 400,
             )
         return JSONResponse(content=result.model_dump())
-    except (EngineGenerateError, EngineDeadError):
-        raise
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value, detail=str(e)) from e
     except Exception as e:
@@ -1200,10 +1198,6 @@ async def health(raw_request: Request) -> JSONResponse:
             content={"status": "unhealthy"},
             status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
         )
-    return JSONResponse(
-        content={"status": "unhealthy"},
-        status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
-    )
 
 
 # Remove existing models endpoint if present (from vllm imports)
@@ -1333,8 +1327,6 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
         )
 
     except HTTPException:
-        raise
-    except (EngineGenerateError, EngineDeadError):
         raise
     except ValueError as e:
         logger.error(f"Validation error: {e}")
@@ -1548,8 +1540,6 @@ async def edit_images(
         )
 
     except HTTPException:
-        raise
-    except (EngineGenerateError, EngineDeadError):
         raise
     except ValueError as e:
         logger.error(f"Validation error: {e}")
