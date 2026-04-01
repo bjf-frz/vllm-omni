@@ -98,6 +98,10 @@ class StageDiffusionClient:
         except DiffusionRequestAbortedError as e:
             logger.info(
                 "[StageDiffusionClient] Stage-%s req=%s aborted: %s",
+                self.stage_id,
+                request_id,
+                e,
+            )
         except EngineDeadError as e:
             logger.error(
                 "[StageDiffusionClient] Stage-%s req=%s engine dead: %s",
