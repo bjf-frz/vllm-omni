@@ -12,6 +12,7 @@ import huggingface_hub
 from vllm.logger import init_logger
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from vllm_omni.diffusion.data import OmniRequestError
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 from vllm_omni.entrypoints.client_request_state import ClientRequestState
 from vllm_omni.entrypoints.utils import get_final_stage_id_for_e2e
@@ -206,7 +207,14 @@ class OmniBase:
             return True, None, None, None
 
         if msg_type == "error":
-            raise RuntimeError(msg.get("error", "Orchestrator returned an error message"))
+            raise OmniRequestError(
+                msg.get("error", "Orchestrator returned an error message"),
+                status_code=msg.get("status_code", 500),
+                request_id=msg.get("request_id"),
+                stage_id=msg.get("stage_id"),
+                error_type=msg.get("error_type"),
+                detail=msg.get("detail") or {},
+            )
 
         if msg_type != "output":
             logger.warning("[%s] got unexpected msg type: %s", self.__class__.__name__, msg_type)

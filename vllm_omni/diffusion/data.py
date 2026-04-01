@@ -675,6 +675,49 @@ class DiffusionOutput:
     peak_memory_mb: float = 0.0
 
 
+@dataclass
+class OmniRequestError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 500,
+        request_id: str | None = None,
+        stage_id: int | None = None,
+        error_type: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.stage_id = stage_id
+        self.error_type = error_type or self.__class__.__name__
+        self.detail = detail or {}
+
+
+def normalize_omni_error(
+    exc: Exception,
+    *,
+    status_code: int = 500,
+    request_id: str | None = None,
+    stage_id: int | None = None,
+) -> OmniRequestError:
+    if isinstance(exc, OmniRequestError):
+        if exc.request_id is None:
+            exc.request_id = request_id
+        if exc.stage_id is None:
+            exc.stage_id = stage_id
+        return exc
+
+    return OmniRequestError(
+        str(exc),
+        status_code=status_code,
+        request_id=request_id,
+        stage_id=stage_id,
+        error_type=type(exc).__name__,
+    )
+
+
 class AttentionBackendEnum(enum.Enum):
     FA = enum.auto()
     SLIDING_TILE_ATTN = enum.auto()

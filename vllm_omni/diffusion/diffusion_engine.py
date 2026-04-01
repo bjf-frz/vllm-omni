@@ -11,7 +11,7 @@ import PIL.Image
 import torch
 from vllm.logger import init_logger
 
-from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
+from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig, OmniRequestError, normalize_omni_error
 from vllm_omni.diffusion.executor.abstract import DiffusionExecutor
 from vllm_omni.diffusion.registry import (
     DiffusionModelRegistry,
@@ -99,7 +99,12 @@ class DiffusionEngine:
         exec_total_time = time.perf_counter() - exec_start_time
 
         if output.error:
-            raise Exception(f"{output.error}")
+            # raise Exception(f"{output.error}")
+            raise OmniRequestError(
+                output.error,
+                status_code=500,
+                error_type="DiffusionExecutionError",
+            )
         logger.info("Generation completed successfully.")
 
         if output.output is None:
@@ -280,33 +285,52 @@ class DiffusionEngine:
             target_sched_req_id = self.scheduler.add_request(request)
 
             # keep scheduling and executing until the target request is finished
-            while True:
-                sched_output = self.scheduler.schedule()
-                if sched_output.is_empty:
-                    if not self.scheduler.has_requests():
-                        raise RuntimeError("Diffusion scheduler has no runnable requests.")
-                    continue
+            try:
+                while True:
+                    sched_output = self.scheduler.schedule()
+                    if sched_output.is_empty:
+                        if not self.scheduler.has_requests():
+                            # raise RuntimeError("Diffusion scheduler has no runnable requests.")
+                            raise OmniRequestError(
+                                "Diffusion scheduler has no runnable requests.",
+                                status_code=500,
+                                error_type="SchedulerError",
+                            )
+                        continue
 
-                # NOTE: add_req_and_wait_for_response() is synchronous, and
-                # the scheduler currently enforces _max_batch_size = 1 (see
-                # vllm_omni/diffusion/sched/base_scheduler.py), so we directly
-                # take the single scheduled request here.
-                sched_req_id = sched_output.scheduled_req_ids[0]
-                req = sched_output.scheduled_new_reqs[0].req
+                    # NOTE: add_req_and_wait_for_response() is synchronous, and
+                    # the scheduler currently enforces _max_batch_size = 1 (see
+                    # vllm_omni/diffusion/sched/base_scheduler.py), so we directly
+                    # take the single scheduled request here.
+                    sched_req_id = sched_output.scheduled_req_ids[0]
+                    req = sched_output.scheduled_new_reqs[0].req
+                    try:
+                        output = self.executor.add_req(req)
+                    except Exception as exc:
+                        logger.error(
+                            "Execution failed for diffusion request %s",
+                            sched_req_id,
+                            exc_info=True,
+                        )
+                        # output = DiffusionOutput(error=str(exc))
+                        raise normalize_omni_error(exc) from exc
+
+                    finished_req_ids = self.scheduler.update_from_output(sched_output, output)
+
+                    if output.error:
+                        raise OmniRequestError(
+                            output.error,
+                            status_code=500,
+                            error_type="DiffusionExecutionError",
+                        )
+                    if target_sched_req_id in finished_req_ids:
+                        # self.scheduler.pop_request_state(target_sched_req_id)
+                        return output
+            finally:
                 try:
-                    output = self.executor.add_req(req)
-                except Exception as exc:
-                    logger.error(
-                        "Execution failed for diffusion request %s",
-                        sched_req_id,
-                        exc_info=True,
-                    )
-                    output = DiffusionOutput(error=str(exc))
-
-                finished_req_ids = self.scheduler.update_from_output(sched_output, output)
-                if target_sched_req_id in finished_req_ids:
                     self.scheduler.pop_request_state(target_sched_req_id)
-                    return output
+                except Exception:
+                    logger.debug("Request state already removed: %s", target_sched_req_id, exc_info=True)
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         """Start or stop torch profiling on all diffusion workers.

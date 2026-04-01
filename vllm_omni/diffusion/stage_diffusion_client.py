@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
 
+from vllm_omni.diffusion.data import normalize_omni_error
 from vllm_omni.engine.stage_init_utils import StageMetadata
 from vllm_omni.entrypoints.async_omni_diffusion import AsyncOmniDiffusion
 from vllm_omni.outputs import OmniRequestOutput
@@ -75,11 +76,24 @@ class StageDiffusionClient:
             result = await self._engine.generate(prompt, sampling_params, request_id)
             await self._output_queue.put(result)
         except Exception as e:
+            err = normalize_omni_error(e, request_id=request_id, stage_id=self.stage_id)
             logger.exception(
                 "[StageDiffusionClient] Stage-%s req=%s failed: %s",
                 self.stage_id,
                 request_id,
-                e,
+                err,
+            )
+            await self._output_queue.put(
+                {
+                    "type": "error",
+                    "request_id": request_id,
+                    "stage_id": self.stage_id,
+                    "status_code": err.status_code,
+                    "error": str(err),
+                    "error_type": err.error_type,
+                    "detail": err.detail,
+                    "finished": True,
+                }
             )
         finally:
             self._tasks.pop(request_id, None)
