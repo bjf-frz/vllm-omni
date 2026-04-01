@@ -240,7 +240,7 @@ class AsyncOmniDiffusion:
                 self.engine.step,
                 request,
             )
-        except EngineDeadError:
+        except (DiffusionRequestAbortedError, EngineDeadError):
             raise
         except Exception as e:
             logger.error("Batch generation failed for request %s: %s", request_id, e)
