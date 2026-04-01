@@ -497,14 +497,14 @@ class TestDiffusionEngineDeadErrorPassthrough:
 
     def test_engine_dead_error_propagates(self):
         engine, executor, _, _ = _make_engine()
-        executor.add_req = Mock(side_effect=EngineDeadError())
+        engine.execute_fn = Mock(side_effect=EngineDeadError())
 
         with pytest.raises(EngineDeadError):
             engine.add_req_and_wait_for_response(_mock_request("dead"))
 
     def test_runtime_error_wrapped_in_output(self):
         engine, executor, _, _ = _make_engine()
-        executor.add_req = Mock(side_effect=RuntimeError("gpu fault"))
+        engine.execute_fn = Mock(side_effect=RuntimeError("gpu fault"))
 
         out = engine.add_req_and_wait_for_response(_mock_request("fault"))
         assert isinstance(out, DiffusionOutput)
