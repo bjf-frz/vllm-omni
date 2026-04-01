@@ -310,7 +310,7 @@ class AsyncOmni(EngineClient, OmniBase):
                 )
                 if self.errored:
                     raise EngineDeadError(error_text)
-                raise EngineGenerateError() from RuntimeError(f"Stage {stage_id} error: {error_text}")
+                raise EngineGenerateError() from RuntimeError(error_text)
 
             # Process the result (constructs OmniRequestOutput)
             output_to_yield = self._process_single_result(
