@@ -242,6 +242,29 @@ class Orchestrator:
                     output = stage_client.get_diffusion_output_async()
                     if output is not None:
                         idle = False
+
+                        if isinstance(output, dict) and output.get("type") == "error":
+                            req_id = output.get("request_id")
+                            req_state = self.request_states.get(req_id)
+
+                            await self.output_async_queue.put(
+                                {
+                                    "type": "error",
+                                    "request_id": req_id,
+                                    "stage_id": stage_id,
+                                    "status_code": output.get("status_code", 500),
+                                    "error": output.get("error", "Unknown diffusion stage error"),
+                                    "error_type": output.get("error_type"),
+                                    "detail": output.get("detail") or {},
+                                    "finished": True,
+                                    "stage_submit_ts": req_state.stage_submit_ts.get(stage_id) if req_state else None,
+                                }
+                            )
+
+                            self._cleanup_companion_state(req_id)
+                            self.request_states.pop(req_id, None)
+                            continue
+
                         req_state = self.request_states.get(output.request_id)
                         if req_state is not None:
                             stage_metrics = self._build_stage_metrics(stage_id, output.request_id, [output], req_state)

@@ -21,6 +21,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from vllm_omni.diffusion.data import OmniRequestError
 from vllm_omni.entrypoints.client_request_state import ClientRequestState
 from vllm_omni.entrypoints.omni_base import OmniBase
 from vllm_omni.metrics.stats import OrchestratorAggregator as OrchestratorMetrics
@@ -290,14 +291,15 @@ class AsyncOmni(EngineClient, OmniBase):
             stage_id = result.get("stage_id", 0)
 
             # Check for errors
-            if "error" in result:
-                logger.error(
-                    "[AsyncOmni] Orchestrator error for req=%s stage-%s: %s",
-                    request_id,
-                    stage_id,
-                    result["error"],
+            if isinstance(result, dict) and result.get("type") == "error":
+                raise OmniRequestError(
+                    result.get("error", "Unknown orchestrator error"),
+                    status_code=result.get("status_code", 500),
+                    request_id=result.get("request_id", request_id),
+                    stage_id=result.get("stage_id", stage_id),
+                    error_type=result.get("error_type"),
+                    detail=result.get("detail") or {},
                 )
-                raise RuntimeError(result)
 
             # Process the result (constructs OmniRequestOutput)
             output_to_yield = self._process_single_result(
@@ -344,6 +346,13 @@ class AsyncOmni(EngineClient, OmniBase):
                         await asyncio.sleep(_FINAL_OUTPUT_IDLE_SLEEP_S)
                         continue
 
+                    if isinstance(msg, dict) and msg.get("type") == "error":
+                        req_id = msg.get("request_id")
+                        req_state = self.request_states.get(req_id)
+                        if req_state is not None:
+                            await req_state.queue.put(msg)
+                        continue
+
                     should_continue, _, stage_id, req_state = self._handle_output_message(msg)
                     if should_continue:
                         continue
@@ -358,7 +367,16 @@ class AsyncOmni(EngineClient, OmniBase):
             except Exception as e:
                 logger.exception("[AsyncOmni] final_output_loop failed.")
                 for req_state in list(self.request_states.values()):
-                    error_msg = {"request_id": req_state.request_id, "error": str(e)}
+                    # error_msg = {"request_id": req_state.request_id, "error": str(e)}
+                    error_msg = {
+                        "type": "error",
+                        "request_id": req_state.request_id,
+                        "status_code": 500,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "detail": {},
+                        "finished": True,
+                    }
                     await req_state.queue.put(error_msg)
                 self.final_output_task = None
 

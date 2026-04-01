@@ -13,6 +13,7 @@ from PIL import Image
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 
+from vllm_omni.diffusion.data import OmniRequestError
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.openai.protocol.videos import (
     VideoData,
@@ -214,12 +215,24 @@ class OmniOpenAIServingVideo:
         sampling_params_list: list[OmniSamplingParams] = [gen_params for _ in stage_configs]
 
         result = None
-        async for output in engine_client.generate(
-            prompt=prompt,
-            request_id=request_id,
-            sampling_params_list=sampling_params_list,
-        ):
-            result = output
+        try:
+            async for output in engine_client.generate(
+                prompt=prompt,
+                request_id=request_id,
+                sampling_params_list=sampling_params_list,
+            ):
+                result = output
+        except OmniRequestError as e:
+            raise HTTPException(
+                status_code=e.status_code,
+                detail={
+                    "message": str(e),
+                    "request_id": e.request_id,
+                    "stage_id": e.stage_id,
+                    "error_type": e.error_type,
+                    "detail": e.detail,
+                },
+            ) from e
 
         if result is None:
             raise HTTPException(

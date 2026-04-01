@@ -18,7 +18,7 @@ from typing import Any
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_file_to_dict
 
-from vllm_omni.diffusion.data import OmniDiffusionConfig, TransformerConfig
+from vllm_omni.diffusion.data import OmniDiffusionConfig, TransformerConfig, normalize_omni_error
 from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniPromptType
@@ -237,7 +237,8 @@ class AsyncOmniDiffusion:
             )
         except Exception as e:
             logger.error("Batch generation failed for request %s: %s", request_id, e)
-            raise RuntimeError(f"Diffusion batch generation failed: {e}") from e
+            # raise RuntimeError(f"Diffusion batch generation failed: {e}") from e
+            raise normalize_omni_error(e, request_id=request_id) from e
 
         # Combine all per-prompt results into a single OmniRequestOutput
         all_images = []
@@ -310,7 +311,8 @@ class AsyncOmniDiffusion:
             result = result[0]
         except Exception as e:
             logger.error("Generation failed for request %s: %s", request_id, e)
-            raise RuntimeError(f"Diffusion generation failed: {e}") from e
+            # raise RuntimeError(f"Diffusion generation failed: {e}") from e
+            raise normalize_omni_error(e, request_id=request_id) from e
 
         if not result.request_id:
             result.request_id = request_id
