@@ -72,7 +72,7 @@ class StageDiffusionClient:
         sampling_params: OmniDiffusionSamplingParams,
     ) -> None:
         if self._engine_dead:
-            raise EngineDeadError()
+            self._raise_engine_dead()
         task = asyncio.create_task(
             self._run(request_id, prompt, sampling_params),
             name=f"diffusion-{request_id}",
@@ -130,14 +130,14 @@ class StageDiffusionClient:
         prompts: list[OmniPromptType],
         sampling_params: OmniDiffusionSamplingParams,
     ) -> None:
-        if self._engine_dead:
-            raise EngineDeadError()
         """Submit a list of prompts as a single batched engine call.
 
         All prompts are processed in one ``DiffusionEngine.step()`` call
         and the combined result is placed on the output queue with a single
         *request_id*.
         """
+        if self._engine_dead:
+            self._raise_engine_dead()
         task = asyncio.create_task(
             self._run_batch(request_id, prompts, sampling_params),
             name=f"diffusion-batch-{request_id}",
@@ -260,13 +260,18 @@ class StageDiffusionClient:
             self._engine_dead = True
             self._dead_error = exc
 
+    def _raise_engine_dead(self) -> None:
+        if self._dead_error is not None:
+            raise EngineDeadError(str(self._dead_error)) from self._dead_error
+        raise EngineDeadError(f"Stage-{self.stage_id} diffusion engine dead")
+
     def check_health(self) -> None:
         """Raise ``EngineDeadError`` if the diffusion engine is dead.
 
         Mirrors the ``check_health`` protocol on vLLM's ``EngineClient``.
         """
         if self._engine_dead:
-            raise EngineDeadError()
+            self._raise_engine_dead()
 
     def shutdown(self) -> None:
         for task in self._tasks.values():

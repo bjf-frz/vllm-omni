@@ -289,6 +289,9 @@ class AsyncOmni(EngineClient, OmniBase):
 
             stage_id = result.get("stage_id", 0)
 
+            if result.get("type") == "error" and result.get("fatal"):
+                raise EngineDeadError(result.get("error", ""))
+
             # Check for errors
             if "error" in result:
                 logger.error(
@@ -371,7 +374,12 @@ class AsyncOmni(EngineClient, OmniBase):
             except EngineDeadError as e:
                 logger.error("[AsyncOmni] Engine dead: %s", e)
                 for req_state in list(self.request_states.values()):
-                    error_msg = {"request_id": req_state.request_id, "error": str(e)}
+                    error_msg = {
+                        "type": "error",
+                        "error": str(e),
+                        "fatal": True,
+                        "request_id": req_state.request_id,
+                    }
                     await req_state.queue.put(error_msg)
             except Exception as e:
                 logger.exception("[AsyncOmni] final_output_loop failed.")

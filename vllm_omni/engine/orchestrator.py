@@ -22,7 +22,6 @@ from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutputs
-from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_omni.distributed.omni_connectors.adapter import compute_talker_prompt_ids_length
 from vllm_omni.engine import (
@@ -241,7 +240,7 @@ class Orchestrator:
                 stage_client = self.stage_clients[stage_id]
                 if stage_client.stage_type == "diffusion":
                     if getattr(stage_client, "_engine_dead", False):
-                        raise EngineDeadError()
+                        stage_client._raise_engine_dead()
 
                     output = stage_client.get_diffusion_output_async()
                     if output is not None:
@@ -260,7 +259,7 @@ class Orchestrator:
                             )
                             self.request_states.pop(output.request_id, None)
                             if getattr(stage_client, "_engine_dead", False):
-                                raise EngineDeadError()
+                                stage_client._raise_engine_dead()
                             continue
 
                         req_state = self.request_states.get(output.request_id)
