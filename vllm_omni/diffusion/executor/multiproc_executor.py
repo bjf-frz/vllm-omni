@@ -110,6 +110,23 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
         if self._result_mq is None:
             raise RuntimeError("Result queue not initialized")
 
+    def _dequeue_one_with_failure_polling(self, deadline: float | None, method: str) -> Any:
+        """Block until one result message, polling ``is_failed`` between chunk timeouts."""
+        while True:
+            if self.is_failed:
+                raise EngineDeadError()
+            if deadline is None:
+                chunk_timeout = _DEQUEUE_TIMEOUT_S
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"RPC call to {method} timed out.")
+                chunk_timeout = min(_DEQUEUE_TIMEOUT_S, remaining)
+            try:
+                return self._result_mq.dequeue(timeout=chunk_timeout)
+            except (TimeoutError, zmq.error.Again):
+                continue
+
     def _launch_workers(self, broadcast_handle):
         od_config = self.od_config
         logger.info("Starting server...")
@@ -219,9 +236,6 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
 
     def add_req(self, request: OmniDiffusionRequest) -> DiffusionOutput:
         self._ensure_open()
-        if self.is_failed:
-            raise EngineDeadError()
-
         rpc_request = {
             "type": "rpc",
             "method": "generate",
@@ -233,17 +247,7 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
 
         try:
             self._broadcast_mq.enqueue(rpc_request)
-
-            while True:
-                if self.is_failed:
-                    raise EngineDeadError()
-                try:
-                    response = self._result_mq.dequeue(
-                        timeout=_DEQUEUE_TIMEOUT_S,
-                    )
-                    break
-                except (TimeoutError, zmq.error.Again):
-                    continue
+            response = self._result_mq.dequeue()
 
             try:
                 unpack_diffusion_output_shm(response)
@@ -352,27 +356,21 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
 
             responses = []
             for _ in range(num_responses):
-                dequeue_timeout = None if deadline is None else max(0, deadline - time.monotonic())
+                response = self._dequeue_one_with_failure_polling(deadline, method)
+
                 try:
-                    response = self._result_mq.dequeue(timeout=dequeue_timeout)
+                    unpack_diffusion_output_shm(response)
+                except Exception as e:
+                    logger.warning("SHM unpack failed (data may already be inline): %s", e)
 
-                    try:
-                        unpack_diffusion_output_shm(response)
-                    except Exception as e:
-                        logger.warning("SHM unpack failed (data may already be inline): %s", e)
+                # Check if response indicates an error
+                if isinstance(response, dict) and response.get("status") == "error":
+                    raise RuntimeError(
+                        f"Worker failed with error '{response.get('error')}', "
+                        "please check the stack trace above for the root cause"
+                    )
 
-                    # Check if response indicates an error
-                    if isinstance(response, dict) and response.get("status") == "error":
-                        raise RuntimeError(
-                            f"Worker failed with error '{response.get('error')}', "
-                            "please check the stack trace above for the root cause"
-                        )
-
-                    responses.append(response)
-                except zmq.error.Again as e:
-                    raise TimeoutError(f"RPC call to {method} timed out.") from e
-                except TimeoutError as e:
-                    raise TimeoutError(f"RPC call to {method} timed out.") from e
+                responses.append(response)
 
             return responses[0] if unique_reply_rank is not None else responses
         except Exception as e:

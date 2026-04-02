@@ -342,8 +342,9 @@ class TestSerialEngineOperations:
 
 class TestCollectiveRpcTimeoutWhileLockHeld:
     """``collective_rpc(timeout=...)`` must honour its timeout even when
-    another thread holds ``engine._rpc_lock`` indefinitely (e.g. a stalled
-    ``add_req`` waiting on an unresponsive worker).
+    another thread holds ``engine._rpc_lock`` indefinitely (e.g. request
+    execution stalled on ``add_req_and_wait_for_response`` → ``execute_fn``
+    → ``collective_rpc`` while blocked on an unresponsive worker).
     """
 
     def test_rpc_times_out_when_lock_held_directly(self):
@@ -367,10 +368,10 @@ class TestCollectiveRpcTimeoutWhileLockHeld:
         with pytest.raises(TimeoutError):
             engine.collective_rpc("health", timeout=0.5)
 
-    def test_rpc_times_out_when_add_req_stalled_on_worker(self):
+    def test_rpc_times_out_when_request_execution_stalled_on_worker(self):
         """Real-world scenario the bot flagged:
 
-        ``add_req`` holds ``_rpc_lock`` while blocked on
+        The scheduler/execute path holds ``_rpc_lock`` while blocked on
         ``executor._result_mq.dequeue()`` because the worker never replies.
         A concurrent ``collective_rpc(timeout=...)`` must still time out
         instead of hanging forever waiting for the lock.
@@ -442,18 +443,24 @@ class TestCollectiveRpcTimeoutWhileLockHeld:
 
 
 class TestMultiprocExecutorRaisesEngineDeadError:
-    """Executor raises ``EngineDeadError`` when workers have died."""
+    """``collective_rpc`` raises ``EngineDeadError`` when the engine is failed."""
 
-    def test_add_req_raises_when_is_failed(self):
+    def test_collective_rpc_raises_when_is_failed(self):
         executor = object.__new__(MultiprocDiffusionExecutor)
         executor._closed = False
+        executor._broadcast_mq = MagicMock()
         executor._result_mq = MagicMock()
         executor.is_failed = True
 
         with pytest.raises(EngineDeadError):
-            executor.add_req(MagicMock())
+            executor.collective_rpc(
+                "generate",
+                args=(MagicMock(),),
+                unique_reply_rank=0,
+                exec_all_ranks=True,
+            )
 
-    def test_add_req_raises_mid_dequeue_when_is_failed(self):
+    def test_collective_rpc_raises_mid_dequeue_when_is_failed(self):
         """Worker dies while we are polling the dequeue loop."""
         executor, _, res_q = _make_executor()
 
@@ -471,7 +478,12 @@ class TestMultiprocExecutorRaisesEngineDeadError:
         executor._result_mq.dequeue = _dying_dequeue
 
         with pytest.raises(EngineDeadError):
-            executor.add_req(MagicMock())
+            executor.collective_rpc(
+                "generate",
+                args=(MagicMock(),),
+                unique_reply_rank=0,
+                exec_all_ranks=True,
+            )
 
 
 class TestExecutorFailureCallback:
