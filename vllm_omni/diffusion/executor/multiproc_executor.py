@@ -175,11 +175,9 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
         return processes, result_handle
 
     def start_worker_monitor(self) -> None:
-        """Start a daemon thread that watches for unexpected worker death.
-
-        Mirrors ``vllm.executor.multiproc_executor.MultiprocExecutor
-        .start_worker_monitor()``.
-        """
+        # Monitors worker process liveness. If any die unexpectedly,
+        # logs an error, shuts down the executor and invokes the failure
+        # callback to inform the engine.
         sentinels = [p.sentinel for p in self._processes]
         if not sentinels:
             return
