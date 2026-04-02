@@ -311,6 +311,7 @@ class AsyncOmni(EngineClient, OmniBase):
                     stage_id,
                     error_text,
                 )
+                # NOTE: O(n_stages) check for every error.
                 if self.errored:
                     raise EngineDeadError(error_text)
                 raise EngineGenerateError() from RuntimeError(error_text)
