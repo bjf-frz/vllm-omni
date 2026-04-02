@@ -258,8 +258,8 @@ class Orchestrator:
                                 }
                             )
                             self.request_states.pop(output.request_id, None)
-                            if getattr(stage_client, "_engine_dead", False):
-                                stage_client._raise_engine_dead()
+                            if hasattr(stage_client, "check_health"):
+                                stage_client.check_health()
                             continue
 
                         req_state = self.request_states.get(output.request_id)
