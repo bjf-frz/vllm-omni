@@ -197,8 +197,8 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
                     "Diffusion worker(s) died unexpectedly: %s",
                     dead,
                 )
+                self.is_failed = True
 
-            self.is_failed = True
             self.shutdown()
 
             for cb in self._failure_callbacks:
