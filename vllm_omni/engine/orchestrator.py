@@ -239,8 +239,8 @@ class Orchestrator:
                 # the output format in the future to simplify the processing logic in Orchestrator.
                 stage_client = self.stage_clients[stage_id]
                 if stage_client.stage_type == "diffusion":
-                    if getattr(stage_client, "_engine_dead", False):
-                        stage_client._raise_engine_dead()
+                    if hasattr(stage_client, "check_health"):
+                        stage_client.check_health()
 
                     output = stage_client.get_diffusion_output_async()
                     if output is not None:
