@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import os
 import subprocess
-import time
+from datetime import datetime
 from typing import Literal
 
+import pandas as pd
 import torch
 from typing_extensions import override
 from vllm.config import ProfilerConfig
@@ -62,6 +63,11 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
         self._trace_path: str | None = None
         self._table_path: str | None = None
 
+        self._activities = activities
+        self._session_dir: str | None = None
+        self._artifact_paths: dict[str, str | None] = {}
+        self._memory_history_enabled = False
+
         if local_rank in (None, 0):
             logger.info_once(
                 "Omni torch profiling enabled. Traces will be saved to: %s",
@@ -71,6 +77,9 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
 
         self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
         self.profiler = self._create_profiler(profiler_config, activities)
+
+    def _rank(self) -> int:
+        return 0 if self.local_rank is None else self.local_rank
 
     def _get_default_activities(self) -> list[TorchProfilerActivity]:
         """Get default activities for this platform.
@@ -106,19 +115,58 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
                       Can also be a full path (e.g. from diffusion engine).
         """
         self._trace_filename = filename
+        self._session_dir = None
+        self._ensure_session_dir()
+
+    def _ensure_session_dir(self) -> str:
+        """Create one timestamped directory for this profiling run."""
+        if self._session_dir is not None:
+            os.makedirs(self._session_dir, exist_ok=True)
+            return self._session_dir
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        base_name = self._trace_filename or self._worker_name
+
+        if os.path.dirname(base_name):
+            parent_dir = os.path.dirname(base_name)
+            leaf_name = os.path.basename(base_name)
+            session_name = f"{ts}_{leaf_name}"
+            self._session_dir = os.path.join(parent_dir, session_name)
+        else:
+            session_name = f"{ts}_{base_name}"
+            self._session_dir = os.path.join(self._trace_dir, session_name)
+
+        os.makedirs(self._session_dir, exist_ok=True)
+        self._artifact_paths["session_dir"] = self._session_dir
+        return self._session_dir
+
+    def _artifact_path(self, stem: str, suffix: str) -> str:
+        """Build artifact path under the session directory."""
+        return os.path.join(
+            self._ensure_session_dir(),
+            f"{stem}_rank{self._rank()}{suffix}",
+        )
+
+    def _write_text_artifact(self, name: str, content: str) -> str:
+        path = self._artifact_path(name, ".txt")
+        with open(path, "w") as f:
+            f.write(content)
+        self._artifact_paths[name] = path
+        return path
+
+    def _has_cuda_like_activity(self) -> bool:
+        return any(a in self._activities for a in ("CUDA", "MUSA"))
+
+    def _get_time_sort_key(self) -> str:
+        if self._has_cuda_like_activity():
+            return "self_cuda_time_total"
+        return "self_cpu_time_total"
 
     def _on_trace_ready(self, prof) -> None:
         """Custom trace handler: export chrome trace with omni naming."""
-        rank = self.local_rank
-        filename = self._trace_filename or f"{self._worker_name}_{int(time.time())}"
-        # If filename already contains a directory, use as-is (e.g. from
-        # diffusion engine which builds full path). Otherwise join with trace_dir.
-        if os.path.dirname(filename):
-            json_file = f"{filename}_rank{rank}.json"
-        else:
-            json_file = os.path.join(self._trace_dir, f"{filename}_rank{rank}.json")
+        rank = self._rank()
 
-        os.makedirs(os.path.dirname(json_file), exist_ok=True)
+        json_file = self._artifact_path("trace", ".json")
 
         try:
             prof.export_chrome_trace(json_file)
@@ -143,18 +191,143 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
             else:
                 self._trace_path = json_file
 
+            self._artifact_paths["trace"] = self._trace_path
+
         except Exception as e:
             logger.warning("[Rank %s] Failed to export trace: %s", rank, e)
 
+    def _try_enable_memory_history(self) -> None:
+        """Enable CUDA memory history for snapshot-based analysis only."""
+        if not self.profiler_config.torch_profiler_with_memory:
+            return
+        if not self._has_cuda_like_activity():
+            return
+        if not torch.cuda.is_available():
+            return
+
+        try:
+            torch.cuda.memory._record_memory_history(
+                enabled="all",
+                context="all",
+                stacks="python",
+                max_entries=100000,
+                clear_history=True,
+            )
+            self._memory_history_enabled = True
+            logger.info("[Rank %s] CUDA memory history enabled", self._rank())
+        except Exception as e:
+            logger.warning(
+                "[Rank %s] Failed to enable CUDA memory history: %s",
+                self._rank(),
+                e,
+            )
+
+    def _try_dump_memory_snapshot(self) -> None:
+        """Dump CUDA memory snapshot into the current session directory."""
+        if not self._memory_history_enabled:
+            return
+
+        try:
+            snapshot_file = self._artifact_path("memory_snapshot", ".pickle")
+            torch.cuda.memory._dump_snapshot(snapshot_file)
+            self._artifact_paths["memory_snapshot"] = snapshot_file
+            logger.info(
+                "[Rank %s] Memory snapshot dumped to %s",
+                self._rank(),
+                snapshot_file,
+            )
+        except Exception as e:
+            logger.warning(
+                "[Rank %s] Failed to dump CUDA memory snapshot: %s",
+                self._rank(),
+                e,
+            )
+        finally:
+            try:
+                torch.cuda.memory._record_memory_history(enabled=None)
+            except Exception:
+                pass
+            self._memory_history_enabled = False
+
+    def _safe_get(self, obj, name: str, default=None):
+        return getattr(obj, name, default)
+
+    def _event_list_to_rows(self, event_list) -> list[dict]:
+        rows = []
+        for evt in event_list:
+            row = {
+                "name": self._safe_get(evt, "key", None) or self._safe_get(evt, "name", None),
+                "count": self._safe_get(evt, "count", None),
+                "device_type": self._safe_get(evt, "device_type", None),
+                "node_id": self._safe_get(evt, "node_id", None),
+                "self_cpu_time_total_us": self._safe_get(evt, "self_cpu_time_total", None),
+                "cpu_time_total_us": self._safe_get(evt, "cpu_time_total", None),
+                "self_cuda_time_total_us": self._safe_get(evt, "self_cuda_time_total", None),
+                "cuda_time_total_us": self._safe_get(evt, "cuda_time_total", None),
+                "self_xpu_time_total_us": self._safe_get(evt, "self_xpu_time_total", None),
+                "xpu_time_total_us": self._safe_get(evt, "xpu_time_total", None),
+                "self_cpu_memory_usage_bytes": self._safe_get(evt, "self_cpu_memory_usage", None),
+                "cpu_memory_usage_bytes": self._safe_get(evt, "cpu_memory_usage", None),
+                "self_cuda_memory_usage_bytes": self._safe_get(evt, "self_cuda_memory_usage", None),
+                "cuda_memory_usage_bytes": self._safe_get(evt, "cuda_memory_usage", None),
+                "self_xpu_memory_usage_bytes": self._safe_get(evt, "self_xpu_memory_usage", None),
+                "xpu_memory_usage_bytes": self._safe_get(evt, "xpu_memory_usage", None),
+                "input_shapes": str(self._safe_get(evt, "input_shapes", None)),
+                "stack": "\n".join(self._safe_get(evt, "stack", []) or []),
+                "overload_name": self._safe_get(evt, "overload_name", None),
+                "is_async": self._safe_get(evt, "is_async", None),
+                "is_legacy": self._safe_get(evt, "is_legacy", None),
+            }
+            rows.append(row)
+        return rows
+
+    def _write_excel_artifact(self, name: str, sheets: dict[str, list[dict]]) -> str:
+        path = self._artifact_path(name, ".xlsx")
+
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            for sheet_name, rows in sheets.items():
+                df = pd.DataFrame(rows)
+
+                safe_sheet_name = sheet_name if sheet_name else "Sheet1"
+
+                df.to_excel(
+                    writer,
+                    sheet_name=safe_sheet_name,
+                    index=False,
+                    freeze_panes=(1, 0),
+                )
+
+                ws = writer.sheets[safe_sheet_name]
+                ws.auto_filter.ref = ws.dimensions
+
+                for col_cells in ws.columns:
+                    max_len = 0
+                    col_letter = col_cells[0].column_letter
+                    for cell in col_cells[:200]:
+                        try:
+                            val = "" if cell.value is None else str(cell.value)
+                            max_len = max(max_len, len(val))
+                        except Exception:
+                            pass
+                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 80)
+
+        self._artifact_paths[name] = path
+        return path
+
     @override
     def _start(self) -> None:
+        self._ensure_session_dir()
+        self._try_enable_memory_history()
         self.profiler.start()
 
     @override
     def _stop(self) -> None:
         """Stop profiler, export trace via on_trace_ready, and dump table."""
         self.profiler.stop()
-        self._on_stop_hook()
+        try:
+            self._on_stop_hook()
+        finally:
+            self._try_dump_memory_snapshot()
 
     def _on_stop_hook(self) -> None:
         """Hook called after profiler.stop().
@@ -163,6 +336,83 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
         Base implementation handles CUDA time total dump.
         """
         rank = self.local_rank
+        sort_key = self._get_time_sort_key()
+
+        excel_sheets: dict[str, list[dict]] = {}
+
+        # 1) Summary op table
+        summary_events = self.profiler.key_averages()
+        summary_table = summary_events.table(
+            sort_by=sort_key,
+            row_limit=-1,
+        )
+        self._table_path = self._write_text_artifact("ops_summary", summary_table)
+        excel_sheets["summary"] = self._event_list_to_rows(summary_events)
+
+        # 2) Shape-grouped op table
+        if self.profiler_config.torch_profiler_record_shapes:
+            try:
+                shape_events = self.profiler.key_averages(
+                    group_by_input_shape=True,
+                )
+                shape_table = shape_events.table(
+                    sort_by=sort_key,
+                    row_limit=-1,
+                )
+                self._write_text_artifact("ops_by_shape", shape_table)
+                excel_sheets["by_shape"] = self._event_list_to_rows(shape_events)
+            except Exception as e:
+                logger.warning(
+                    "[Rank %s] Failed to export shape-grouped op table: %s",
+                    rank,
+                    e,
+                )
+
+        # 3) Stack-grouped op table
+        if self.profiler_config.torch_profiler_with_stack:
+            try:
+                stack_events = self.profiler.key_averages(
+                    group_by_stack_n=8,
+                )
+                stack_table = stack_events.table(
+                    sort_by=sort_key,
+                    row_limit=-1,
+                )
+                self._write_text_artifact("ops_by_stack", stack_table)
+                excel_sheets["by_stack"] = self._event_list_to_rows(stack_events)
+            except Exception as e:
+                logger.warning(
+                    "[Rank %s] Failed to export stack-grouped op table: %s",
+                    rank,
+                    e,
+                )
+
+            # 4) Export stack files
+            try:
+                cpu_stack_file = self._artifact_path("stacks_cpu", ".txt")
+                self.profiler.export_stacks(
+                    cpu_stack_file,
+                    metric="self_cpu_time_total",
+                )
+                self._artifact_paths["stacks_cpu"] = cpu_stack_file
+            except Exception as e:
+                logger.warning("[Rank %s] export_stacks(cpu) failed: %s", rank, e)
+
+            if self._has_cuda_like_activity():
+                try:
+                    cuda_stack_file = self._artifact_path("stacks_cuda", ".txt")
+                    self.profiler.export_stacks(
+                        cuda_stack_file,
+                        metric="self_cuda_time_total",
+                    )
+                    self._artifact_paths["stacks_cuda"] = cuda_stack_file
+                except Exception as e:
+                    logger.warning("[Rank %s] export_stacks(cuda) failed: %s", rank, e)
+
+        try:
+            self._write_excel_artifact("ops", excel_sheets)
+        except Exception as e:
+            logger.warning("[Rank %s] Failed to export Excel workbook: %s", rank, e)
 
         if self.profiler_config.torch_profiler_dump_cuda_time_total:
             profiler_dir = self.profiler_config.torch_profiler_dir
@@ -190,6 +440,7 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
         return {
             "trace": self._trace_path,
             "table": self._table_path,
+            **self._artifact_paths,
         }
 
 
