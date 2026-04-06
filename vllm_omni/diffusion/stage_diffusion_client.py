@@ -1,21 +1,35 @@
 """Stage Diffusion Client for vLLM-Omni multi-stage runtime.
 
-Wraps AsyncOmniDiffusion to expose the same interface the Orchestrator
-expects from any stage client.
+Spawns StageDiffusionProc in a subprocess and communicates via ZMQ
+(PUSH/PULL) to expose the same interface the Orchestrator expects
+from any stage client.
 """
 
 from __future__ import annotations
 
 import asyncio
+import multiprocessing.connection
 import time
+import uuid
+import weakref
+from dataclasses import fields, is_dataclass
+from threading import Thread
 from typing import TYPE_CHECKING, Any
 
+import zmq
 from vllm.logger import init_logger
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from vllm_omni.diffusion.data import DiffusionRequestAbortedError
-from vllm_omni.engine.stage_init_utils import StageMetadata
-from vllm_omni.entrypoints.async_omni_diffusion import AsyncOmniDiffusion
+from vllm_omni.diffusion.stage_diffusion_proc import (
+    StageDiffusionProc,
+    complete_diffusion_handshake,
+    spawn_diffusion_proc,
+)
+from vllm_omni.distributed.omni_connectors.utils.serialization import (
+    OmniMsgpackDecoder,
+    OmniMsgpackEncoder,
+)
+from vllm_omni.engine.stage_init_utils import StageMetadata, terminate_alive_proc
 from vllm_omni.outputs import OmniRequestOutput
 
 if TYPE_CHECKING:
@@ -26,11 +40,12 @@ logger = init_logger(__name__)
 
 
 class StageDiffusionClient:
-    """Wraps AsyncOmniDiffusion for use inside the Orchestrator.
+    """Communicates with StageDiffusionProc via ZMQ for use inside the Orchestrator.
 
     Exposes the same attributes and async methods the Orchestrator
     uses on StageEngineCoreClient, but routes execution through
-    DiffusionEngine instead of vLLM EngineCore.
+    a StageDiffusionProc subprocess instead of running the diffusion
+    engine in-process.
     """
 
     stage_type: str = "diffusion"
@@ -49,21 +64,167 @@ class StageDiffusionClient:
         self.custom_process_input_func = metadata.custom_process_input_func
         self.engine_input_source = metadata.engine_input_source
 
-        self._engine = AsyncOmniDiffusion(model=model, od_config=od_config, batch_size=batch_size)
-        self._output_queue: asyncio.Queue[OmniRequestOutput] = asyncio.Queue()
-        self._tasks: dict[str, asyncio.Task] = {}
-        self._engine_dead: bool = False
-        self._dead_error: BaseException | None = None
+        # Spawn StageDiffusionProc subprocess and wait for READY.
+        proc, handshake_address, request_address, response_address = spawn_diffusion_proc(model, od_config)
+        complete_diffusion_handshake(proc, handshake_address)
+        self._proc = proc
 
-        executor = getattr(self._engine.engine, "executor", None)
-        if executor is not None and hasattr(executor, "register_failure_callback"):
-            executor.register_failure_callback(
-                lambda: self._set_engine_dead(
-                    RuntimeError("Diffusion worker process died"),
-                )
-            )
+        # ZMQ sockets (sync) for communicating with the subprocess.
+        self._zmq_ctx = zmq.Context()
+        self._request_socket = self._zmq_ctx.socket(zmq.PUSH)
+        self._request_socket.connect(request_address)
+        self._response_socket = self._zmq_ctx.socket(zmq.PULL)
+        self._response_socket.connect(response_address)
+
+        self._encoder = OmniMsgpackEncoder()
+        self._decoder = OmniMsgpackDecoder()
+
+        # Buffers for demultiplexing response messages.
+        self._output_queue: asyncio.Queue[OmniRequestOutput] = asyncio.Queue()
+        self._rpc_results: dict[str, Any] = {}
+        self._pending_rpcs: set[str] = set()
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._shutting_down = False
+        self._engine_dead: bool = False
+
+        # Background thread to detect silent process death (SIGKILL, segfault)
+        # where the subprocess cannot send the ZMQ death sentinel.
+        # Mirrors MPClient.start_engine_core_monitor() in vLLM.
+        self._start_proc_monitor()
 
         logger.info("[StageDiffusionClient] Stage-%s initialized (batch_size=%d)", self.stage_id, batch_size)
+
+    # ------------------------------------------------------------------
+    # Process monitor (mirrors vLLM's MPClient.start_engine_core_monitor)
+    # ------------------------------------------------------------------
+
+    def _start_proc_monitor(self) -> None:
+        """Start a daemon thread that watches the subprocess sentinel.
+
+        When the subprocess dies without sending the ZMQ death sentinel
+        (e.g. SIGKILL, segfault), this thread sets ``_engine_dead`` so
+        subsequent calls raise ``EngineDeadError``.
+        """
+        proc = self._proc
+        self_ref = weakref.ref(self)
+
+        def _monitor() -> None:
+            multiprocessing.connection.wait([proc.sentinel])
+            client = self_ref()
+            if client is None or client._shutting_down or client._engine_dead:
+                return
+            client._engine_dead = True
+            logger.error(
+                "[StageDiffusionClient] Stage-%s StageDiffusionProc died unexpectedly (exit code %s).",
+                client.stage_id,
+                proc.exitcode,
+            )
+
+        Thread(target=_monitor, daemon=True, name="DiffusionProcMonitor").start()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _drain_responses(self) -> None:
+        """Non-blocking drain of all available responses from the subprocess."""
+        while True:
+            try:
+                raw = self._response_socket.recv(zmq.NOBLOCK)
+            except zmq.Again:
+                break
+
+            # Check for the death sentinel (raw bytes, not msgpack-encoded).
+            if raw == StageDiffusionProc.DIFFUSION_PROC_DEAD:
+                self._engine_dead = True
+                logger.error(
+                    "[StageDiffusionClient] Stage-%s received DIFFUSION_PROC_DEAD sentinel from subprocess.",
+                    self.stage_id,
+                )
+                break
+
+            msg = self._decoder.decode(raw)
+            msg_type = msg.get("type")
+
+            if msg_type == "result":
+                self._output_queue.put_nowait(msg["output"])
+            elif msg_type == "rpc_result":
+                self._rpc_results[msg["rpc_id"]] = msg["result"]
+            elif msg_type == "error":
+                req_id = msg.get("request_id")
+                rpc_id = msg.get("rpc_id")
+                error_msg = msg.get("error")
+                logger.error(
+                    "[StageDiffusionClient] Stage-%s subprocess error for %s: %s",
+                    self.stage_id,
+                    rpc_id or req_id,
+                    error_msg,
+                )
+                # Route RPC errors so collective_rpc_async can unblock.
+                if rpc_id is not None and rpc_id in self._pending_rpcs:
+                    self._rpc_results[rpc_id] = {
+                        "error": True,
+                        "reason": error_msg,
+                    }
+                # Route request errors as error outputs so the Orchestrator
+                # sees the request complete (instead of hanging forever).
+                if req_id is not None:
+                    self._output_queue.put_nowait(OmniRequestOutput.from_error(req_id, error_msg))
+
+    # Fields that are subprocess-local and cannot be serialized across
+    # process boundaries.  They are recreated in the subprocess with
+    # their default values.
+    _NON_SERIALIZABLE_FIELDS = frozenset(
+        {
+            "generator",  # torch.Generator — recreated from seed
+            "modules",  # model components — loaded in subprocess
+        }
+    )
+
+    @staticmethod
+    def _sampling_params_to_dict(sampling_params: Any) -> dict[str, Any]:
+        """Convert sampling params to a plain dict for serialization.
+
+        Uses ``dataclasses.fields`` + ``getattr`` instead of ``asdict``
+        to avoid deep-copying large tensors, and skips fields that
+        cannot cross process boundaries.
+
+        When a ``torch.Generator`` is present but ``seed`` is not set,
+        the generator's initial seed is extracted so the subprocess can
+        recreate an equivalent generator via ``diffusion_model_runner``.
+        """
+        if is_dataclass(sampling_params) and not isinstance(sampling_params, type):
+            result = {
+                f.name: getattr(sampling_params, f.name)
+                for f in fields(sampling_params)
+                if f.name not in StageDiffusionClient._NON_SERIALIZABLE_FIELDS
+            }
+        elif not isinstance(sampling_params, dict):
+            raise TypeError(f"sampling_params is not a dict but {sampling_params.__class__.__name__}")
+        else:
+            result = {
+                k: v for k, v in sampling_params.items() if k not in StageDiffusionClient._NON_SERIALIZABLE_FIELDS
+            }
+
+        # Preserve the generator's seed across the process boundary so
+        # the subprocess can recreate deterministic random state.
+        if result.get("seed") is None:
+            generator = (
+                getattr(sampling_params, "generator", None)
+                if not isinstance(sampling_params, dict)
+                else sampling_params.get("generator")
+            )
+            if generator is not None:
+                if isinstance(generator, list) and generator:
+                    generator = generator[0]
+                if hasattr(generator, "initial_seed"):
+                    result["seed"] = generator.initial_seed()
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Public API (matches the interface the Orchestrator expects)
+    # ------------------------------------------------------------------
 
     async def add_request_async(
         self,
@@ -72,55 +233,17 @@ class StageDiffusionClient:
         sampling_params: OmniDiffusionSamplingParams,
     ) -> None:
         if self._engine_dead:
-            self._raise_engine_dead()
-        task = asyncio.create_task(
-            self._run(request_id, prompt, sampling_params),
-            name=f"diffusion-{request_id}",
+            raise EngineDeadError()
+        self._request_socket.send(
+            self._encoder.encode(
+                {
+                    "type": "add_request",
+                    "request_id": request_id,
+                    "prompt": prompt,
+                    "sampling_params": self._sampling_params_to_dict(sampling_params),
+                }
+            )
         )
-        self._tasks[request_id] = task
-
-    async def _run(
-        self,
-        request_id: str,
-        prompt: OmniPromptType,
-        sampling_params: OmniDiffusionSamplingParams,
-    ) -> None:
-        try:
-            result = await self._engine.generate(prompt, sampling_params, request_id)
-            await self._output_queue.put(result)
-        except asyncio.CancelledError:
-            logger.info(
-                "[StageDiffusionClient] Stage-%s req=%s cancelled",
-                self.stage_id,
-                request_id,
-            )
-            raise
-        except DiffusionRequestAbortedError as e:
-            logger.info(
-                "[StageDiffusionClient] Stage-%s req=%s aborted: %s",
-                self.stage_id,
-                request_id,
-                e,
-            )
-        except EngineDeadError as e:
-            logger.error(
-                "[StageDiffusionClient] Stage-%s req=%s engine dead: %s",
-                self.stage_id,
-                request_id,
-                e,
-            )
-            self._set_engine_dead(e)
-            await self._output_queue.put(OmniRequestOutput.from_error(request_id, str(e)))
-        except Exception as e:
-            logger.exception(
-                "[StageDiffusionClient] Stage-%s req=%s failed: %s",
-                self.stage_id,
-                request_id,
-                e,
-            )
-            await self._output_queue.put(OmniRequestOutput.from_error(request_id, str(e)))
-        finally:
-            self._tasks.pop(request_id, None)
 
     # TODO(Long): Temporary solution to boost performance of diffusion stages.
     # Remove this after scheduling algorithm is implemented
@@ -137,7 +260,7 @@ class StageDiffusionClient:
         *request_id*.
         """
         if self._engine_dead:
-            self._raise_engine_dead()
+            raise EngineDeadError()
         task = asyncio.create_task(
             self._run_batch(request_id, prompts, sampling_params),
             name=f"diffusion-batch-{request_id}",
@@ -151,21 +274,16 @@ class StageDiffusionClient:
         sampling_params: OmniDiffusionSamplingParams,
     ) -> None:
         try:
-            result = await self._engine.generate_batch(
-                prompts,
-                sampling_params,
-                request_id,
+            self._request_socket.send(
+                self._encoder.encode(
+                    {
+                        "type": "add_batch_request",
+                        "request_id": request_id,
+                        "prompts": prompts,
+                        "sampling_params": self._sampling_params_to_dict(sampling_params),
+                    }
+                )
             )
-            await self._output_queue.put(result)
-        except EngineDeadError as e:
-            logger.error(
-                "[StageDiffusionClient] Stage-%s batch req=%s engine dead: %s",
-                self.stage_id,
-                request_id,
-                e,
-            )
-            self._set_engine_dead(e)
-            await self._output_queue.put(OmniRequestOutput.from_error(request_id, str(e)))
         except Exception as e:
             logger.exception(
                 "[StageDiffusionClient] Stage-%s batch req=%s failed: %s",
@@ -177,18 +295,27 @@ class StageDiffusionClient:
         finally:
             self._tasks.pop(request_id, None)
 
-    def get_diffusion_output_async(self) -> OmniRequestOutput | None:
+    def get_diffusion_output_nowait(self) -> OmniRequestOutput | None:
+        self._drain_responses()
         try:
             return self._output_queue.get_nowait()
         except asyncio.QueueEmpty:
+            if self._engine_dead:
+                raise EngineDeadError()
+            if not self._shutting_down and self._proc is not None and not self._proc.is_alive():
+                self._engine_dead = True
+                raise EngineDeadError()
             return None
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
-        for rid in request_ids:
-            task = self._tasks.pop(rid, None)
-            if task:
-                task.cancel()
-        await self._engine.abort(request_ids)
+        self._request_socket.send(
+            self._encoder.encode(
+                {
+                    "type": "abort",
+                    "request_ids": list(request_ids),
+                }
+            )
+        )
 
     async def collective_rpc_async(
         self,
@@ -197,73 +324,57 @@ class StageDiffusionClient:
         args: tuple[Any, ...] = (),
         kwargs: dict[str, Any] | None = None,
     ) -> Any:
-        """Best-effort control RPC shim for diffusion stages.
+        """Forward control RPCs to the diffusion subprocess."""
+        if self._engine_dead:
+            raise EngineDeadError()
 
-        TODO(AsyncOmni): add dedicated wrappers on AsyncOmniDiffusion for the
-        remaining control APIs instead of reaching into its underlying engine.
-        """
-        kwargs = kwargs or {}
-
-        # Handle profile method: inject stage_id into profile_prefix for diffusion stages
+        # Inject a default profile_prefix that includes stage_id when profiling.
         if method == "profile":
-            target = getattr(self._engine, method, None)
-            if target is None:
-                return {
-                    "supported": False,
-                    "todo": True,
-                    "reason": f"AsyncOmniDiffusion.{method} is not implemented",
-                }
-            # Extract is_start and profile_prefix from args
-            is_start = args[0] if args else True
-            profile_prefix = args[1] if len(args) > 1 else None
-            # Generate profile_prefix with stage_id if starting and no prefix provided
+            args_list = list(args)
+            is_start = args_list[0] if args_list else True
+            profile_prefix = args_list[1] if len(args_list) > 1 else None
             if is_start and profile_prefix is None:
                 profile_prefix = f"stage_{self.stage_id}_diffusion_{int(time.time())}"
-            result = target(is_start, profile_prefix)
-            if timeout is not None:
-                return await asyncio.wait_for(result, timeout=timeout)
-            return await result
+                if len(args_list) > 1:
+                    args_list[1] = profile_prefix
+                else:
+                    args_list.append(profile_prefix)
+                args = tuple(args_list)
 
-        if method in {"add_lora", "remove_lora", "list_loras", "pin_lora"}:
-            target = getattr(self._engine, method, None)
-            if target is None:
-                return {
-                    "supported": False,
-                    "todo": True,
-                    "reason": f"AsyncOmniDiffusion.{method} is not implemented",
+        kwargs = kwargs or {}
+        rpc_id = uuid.uuid4().hex
+        self._pending_rpcs.add(rpc_id)
+
+        self._request_socket.send(
+            self._encoder.encode(
+                {
+                    "type": "collective_rpc",
+                    "rpc_id": rpc_id,
+                    "method": method,
+                    "timeout": timeout,
+                    "args": list(args),
+                    "kwargs": kwargs,
                 }
-            result = target(*args, **kwargs)
-            if timeout is not None:
-                return await asyncio.wait_for(result, timeout=timeout)
-            return await result
-
-        # Fall back to collective RPC for other methods
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self._engine._executor,
-            self._engine.engine.collective_rpc,
-            method,
-            timeout,
-            args,
-            kwargs,
-            None,
+            )
         )
 
-    def _set_engine_dead(self, exc: BaseException) -> None:
-        """Mark this client as fatally failed.  Idempotent."""
-        if not self._engine_dead:
-            logger.error(
-                "[StageDiffusionClient] Stage-%s marked dead: %s",
-                self.stage_id,
-                exc,
-            )
-            self._engine_dead = True
-            self._dead_error = exc
-
-    def _raise_engine_dead(self) -> None:
-        if self._dead_error is not None:
-            raise EngineDeadError(str(self._dead_error)) from self._dead_error
-        raise EngineDeadError(f"Stage-{self.stage_id} diffusion engine dead")
+        deadline = time.monotonic() + timeout if timeout else None
+        # Wait for the matching RPC response, buffering result messages.
+        try:
+            while True:
+                self._drain_responses()
+                if rpc_id in self._rpc_results:
+                    return self._rpc_results.pop(rpc_id)
+                if self._engine_dead:
+                    raise EngineDeadError()
+                if self._proc is not None and not self._proc.is_alive():
+                    self._engine_dead = True
+                    raise EngineDeadError()
+                if deadline and time.monotonic() > deadline:
+                    raise TimeoutError(f"collective_rpc_async '{method}' timed out after {timeout}s")
+                await asyncio.sleep(0.01)
+        finally:
+            self._pending_rpcs.discard(rpc_id)
 
     def check_health(self) -> None:
         """Raise ``EngineDeadError`` if the diffusion engine is dead.
@@ -271,10 +382,19 @@ class StageDiffusionClient:
         Mirrors the ``check_health`` protocol on vLLM's ``EngineClient``.
         """
         if self._engine_dead:
-            self._raise_engine_dead()
+            raise EngineDeadError()
 
     def shutdown(self) -> None:
-        for task in self._tasks.values():
-            task.cancel()
-        self._tasks.clear()
-        self._engine.close()
+        self._shutting_down = True
+        try:
+            self._request_socket.send(self._encoder.encode({"type": "shutdown"}))
+        except Exception:
+            pass
+
+        if self._proc is not None and self._proc.is_alive():
+            self._proc.join(timeout=10)
+            terminate_alive_proc(self._proc)
+
+        self._request_socket.close(linger=0)
+        self._response_socket.close(linger=0)
+        self._zmq_ctx.term()

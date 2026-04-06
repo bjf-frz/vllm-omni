@@ -4,11 +4,12 @@
 import asyncio
 import queue
 import threading
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+import zmq
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
@@ -526,7 +527,8 @@ class TestDiffusionEngineDeadErrorPassthrough:
 class TestStageDiffusionClientErrorPropagation:
     """Error surface behaviour of ``StageDiffusionClient``.
 
-    Mocks the heavy AsyncOmniDiffusion engine so tests run without GPU.
+    Uses ``object.__new__`` to construct a client without spawning a real
+    subprocess, then manually sets the fields needed for each test.
     """
 
     def _make_client(self):
@@ -540,50 +542,19 @@ class TestStageDiffusionClientErrorPropagation:
         client.custom_process_input_func = None
         client.engine_input_source = None
 
-        client._engine = MagicMock()
-        client._engine.generate = AsyncMock()
         client._output_queue = asyncio.Queue()
+        client._rpc_results = {}
+        client._pending_rpcs = set()
         client._tasks = {}
+        client._shutting_down = False
         client._engine_dead = False
-        client._dead_error = None
+        client._proc = None
+        client._request_socket = MagicMock()
+        client._response_socket = MagicMock()
+        client._encoder = MagicMock()
+        client._decoder = MagicMock()
 
         return client
-
-    @pytest.mark.asyncio
-    async def test_recoverable_error_queued_without_setting_dead(self):
-        client = self._make_client()
-        client._engine.generate.side_effect = RuntimeError("model crashed")
-
-        await client._run("req-1", "test prompt", None)
-
-        out = client._output_queue.get_nowait()
-        assert out.error is not None
-        assert "model crashed" in out.error
-        assert client._engine_dead is False
-
-    @pytest.mark.asyncio
-    async def test_engine_generate_error_queued_without_setting_dead(self):
-        """EngineGenerateError is recoverable -- error output queued, engine
-        stays alive."""
-        client = self._make_client()
-        client._engine.generate.side_effect = EngineGenerateError()
-
-        await client._run("req-gen", "test prompt", None)
-
-        out = client._output_queue.get_nowait()
-        assert out.error is not None
-        assert client._engine_dead is False
-
-    @pytest.mark.asyncio
-    async def test_engine_dead_error_sets_dead_flag(self):
-        client = self._make_client()
-        client._engine.generate.side_effect = EngineDeadError()
-
-        await client._run("req-2", "test prompt", None)
-
-        assert client._engine_dead is True
-        out = client._output_queue.get_nowait()
-        assert out.error is not None
 
     @pytest.mark.asyncio
     async def test_add_request_raises_when_dead(self):
@@ -603,3 +574,21 @@ class TestStageDiffusionClientErrorPropagation:
     def test_check_health_ok_when_alive(self):
         client = self._make_client()
         client.check_health()
+
+    def test_get_output_raises_engine_dead_when_dead(self):
+        """When ``_engine_dead`` is True and the output queue is empty,
+        ``get_diffusion_output_nowait`` must raise ``EngineDeadError``."""
+        client = self._make_client()
+        client._engine_dead = True
+        # Simulate _drain_responses as a no-op (no ZMQ socket)
+        client._response_socket.recv.side_effect = zmq.Again
+
+        with pytest.raises(EngineDeadError):
+            client.get_diffusion_output_nowait()
+
+    def test_get_output_returns_none_when_alive_and_empty(self):
+        """When the engine is alive and the queue is empty, return None."""
+        client = self._make_client()
+        client._response_socket.recv.side_effect = zmq.Again
+
+        assert client.get_diffusion_output_nowait() is None
