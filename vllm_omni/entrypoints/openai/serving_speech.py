@@ -46,9 +46,14 @@ logger = init_logger(__name__)
 _VOXTRAL_TTS_MODEL_STAGES = {"audio_generation"}
 _QWEN3_TTS_MODEL_STAGES = {"qwen3_tts"}
 _FISH_TTS_MODEL_STAGES = {"fish_speech_slow_ar"}
+_COSYVOICE3_TTS_MODEL_STAGES = {"cosyvoice3_talker"}
 _OMNIVOICE_TTS_MODEL_STAGES = {"omnivoice_generator"}
 _TTS_MODEL_STAGES: set[str] = (
-    _VOXTRAL_TTS_MODEL_STAGES | _QWEN3_TTS_MODEL_STAGES | _FISH_TTS_MODEL_STAGES | _OMNIVOICE_TTS_MODEL_STAGES
+    _VOXTRAL_TTS_MODEL_STAGES
+    | _QWEN3_TTS_MODEL_STAGES
+    | _FISH_TTS_MODEL_STAGES
+    | _COSYVOICE3_TTS_MODEL_STAGES
+    | _OMNIVOICE_TTS_MODEL_STAGES
 )
 _TTS_LANGUAGES: set[str] = {
     "Auto",
@@ -184,6 +189,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         )
         self._fish_speech_tokenizer = None
 
+        self._is_cosyvoice3 = (
+            self._tts_stage is not None
+            and getattr(getattr(self._tts_stage, "engine_args", None), "model_stage", None)
+            in _COSYVOICE3_TTS_MODEL_STAGES
+        )
+        self._cosyvoice3_tokenizer = None
+
         # Determine TTS model type or None
         self._tts_model_type = self._detect_tts_model_type()
 
@@ -258,6 +270,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return "voxtral_tts"
         if model_stage in _FISH_TTS_MODEL_STAGES:
             return "fish_tts"
+        if model_stage in _COSYVOICE3_TTS_MODEL_STAGES:
+            return "cosyvoice3"
         if model_stage in _OMNIVOICE_TTS_MODEL_STAGES:
             return "omnivoice"
         return None
@@ -713,6 +727,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return self._validate_voxtral_tts_request(request)
         if self._tts_model_type == "fish_tts":
             return self._validate_fish_tts_request(request)
+        if self._tts_model_type == "cosyvoice3":
+            return self._validate_cosyvoice3_request(request)
         return self._validate_qwen_tts_request(request)
 
     def _validate_ref_audio_format(self, ref_audio: str) -> str | None:
@@ -884,6 +900,30 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         return None
 
+    def _validate_cosyvoice3_request(self, request: OpenAICreateSpeechRequest) -> str | None:
+        """Validate CosyVoice3 request parameters. Returns error message or None."""
+        if not request.input or not request.input.strip():
+            return "Input text cannot be empty"
+
+        # CosyVoice3 requires reference audio for voice cloning
+        if request.ref_audio is None:
+            return "CosyVoice3 requires 'ref_audio' (reference audio for voice cloning)"
+
+        fmt_err = self._validate_ref_audio_format(request.ref_audio)
+        if fmt_err:
+            return fmt_err
+
+        if not request.ref_text or not request.ref_text.strip():
+            return "CosyVoice3 requires 'ref_text' (transcript of the reference audio)"
+
+        if request.max_new_tokens is not None:
+            if request.max_new_tokens < _TTS_MAX_NEW_TOKENS_MIN:
+                return f"max_new_tokens must be at least {_TTS_MAX_NEW_TOKENS_MIN}"
+            if request.max_new_tokens > _TTS_MAX_NEW_TOKENS_MAX:
+                return f"max_new_tokens cannot exceed {_TTS_MAX_NEW_TOKENS_MAX}"
+
+        return None
+
     async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple[list[float], int]:
         """Resolve ref_audio to (wav_samples, sample_rate).
 
@@ -1001,9 +1041,20 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         streaming needs per-chunk delta slicing; non-streaming needs full concatenation.
         """
         mm = getattr(res, "multimodal_output", None)
+        ro = None
         if not mm:
             ro = getattr(res, "request_output", None)
             mm = getattr(ro, "multimodal_output", None) if ro else None
+        if not mm:
+            if ro is None:
+                ro = getattr(res, "request_output", None)
+            outputs = getattr(ro, "outputs", None) if ro else None
+            if outputs:
+                for completion_output in outputs:
+                    completion_mm = getattr(completion_output, "multimodal_output", None)
+                    if completion_mm:
+                        mm = completion_mm
+                        break
         if not mm:
             return None, None
         key = "audio" if "audio" in mm else ("model_outputs" if "model_outputs" in mm else None)
@@ -1194,6 +1245,33 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             "additional_information": additional_information,
         }
 
+    # ---- CosyVoice3 helpers ----
+
+    async def _build_cosyvoice3_prompt(
+        self,
+        request: OpenAICreateSpeechRequest,
+    ) -> dict[str, Any]:
+        """Build prompt for CosyVoice3.
+
+        CosyVoice3 uses multimodal input with reference audio for voice cloning.
+        The prompt format matches the offline example: text prompt + audio data
+        + mm_processor_kwargs with prompt_text.
+        """
+        # Resolve reference audio
+        wav_samples, sr = await self._resolve_ref_audio(request.ref_audio)
+        audio_data = (np.asarray(wav_samples, dtype=np.float32), sr)
+
+        return {
+            "prompt": request.input,
+            "multi_modal_data": {
+                "audio": audio_data,
+            },
+            "mm_processor_kwargs": {
+                "prompt_text": request.ref_text,
+                "sample_rate": sr,
+            },
+        }
+
     # ---- Common speech generation helpers ----
 
     async def _prepare_speech_generation(
@@ -1224,6 +1302,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if self._tts_model_type == "voxtral_tts":
                 prompt = await self._build_voxtral_prompt(request)
                 tts_params = {}
+            elif self._tts_model_type == "cosyvoice3":
+                prompt = await self._build_cosyvoice3_prompt(request)
+                tts_params = {}
             else:
                 tts_params = self._build_tts_params(request)
                 # Resolve ref_audio (explicit or auto-set for uploaded voices)
@@ -1247,6 +1328,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             model_type = "fish_speech"
         elif self._tts_model_type == "voxtral_tts":
             model_type = "voxtral_tts"
+        elif self._tts_model_type == "cosyvoice3":
+            model_type = "cosyvoice3"
         elif self._is_tts:
             model_type = tts_params.get("task_type", ["unknown"])[0]
         else:
@@ -1259,6 +1342,29 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         )
 
         sampling_params_list = self.engine_client.default_sampling_params_list
+
+        # CosyVoice3: set dynamic min/max tokens based on text length.
+        # The official model requires min_token_text_ratio to prevent early
+        # EOS and max_token_text_ratio to cap generation length.
+        if self._tts_model_type == "cosyvoice3" and sampling_params_list:
+            import copy
+
+            sampling_params_list = copy.deepcopy(sampling_params_list)
+            text_len = len(request.input)  # rough char-level estimate
+            # Use the model's configured ratios (defaults: min=2, max=20)
+            hf_cfg = self.model_config.hf_config
+            min_ratio = getattr(hf_cfg, "min_token_text_ratio", 2)
+            max_ratio = getattr(hf_cfg, "max_token_text_ratio", 20)
+            min_tokens = max(1, int(text_len * min_ratio))
+            max_tokens = min(2048, int(text_len * max_ratio))
+            sampling_params_list[0].min_tokens = min_tokens
+            sampling_params_list[0].max_tokens = max_tokens
+            logger.info(
+                "CosyVoice3 dynamic tokens: text_len=%d, min_tokens=%d, max_tokens=%d",
+                text_len,
+                min_tokens,
+                max_tokens,
+            )
 
         # Fish defaults come from stage_configs YAML. Only override when the caller
         # explicitly requests a different generation length.
@@ -1570,3 +1676,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             succeeded=succeeded,
             failed=len(final_results) - succeeded,
         )
+
+
+ServingSpeech = OmniOpenAIServingSpeech
