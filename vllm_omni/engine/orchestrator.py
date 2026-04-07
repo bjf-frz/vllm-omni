@@ -22,6 +22,7 @@ from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutputs
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_omni.distributed.omni_connectors.adapter import compute_talker_prompt_ids_length
 from vllm_omni.engine import (
@@ -272,6 +273,25 @@ class Orchestrator:
                     continue
                 except asyncio.CancelledError:
                     raise
+                except EngineDeadError as e:
+                    logger.error(
+                        "[Orchestrator] Stage-%s is dead: %s",
+                        stage_id,
+                        e,
+                    )
+                    for req_id, req_state in list(self.request_states.items()):
+                        if stage_id in req_state.stage_submit_ts:
+                            await self.output_async_queue.put(
+                                {
+                                    "type": "error",
+                                    "error": str(e),
+                                    "fatal": True,
+                                    "request_id": req_id,
+                                }
+                            )
+                            self.request_states.pop(req_id, None)
+                    self._shutdown_event.set()
+                    return
                 except Exception:
                     if self._shutdown_event.is_set():
                         return
