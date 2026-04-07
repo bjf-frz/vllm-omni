@@ -394,6 +394,12 @@ class AsyncOmniDiffusion:
         """Check if the engine is stopped."""
         return self._closed
 
+    async def check_health(self) -> None:
+        """Check engine health by verifying the diffusion engine is alive."""
+        if self._closed:
+            raise EngineDeadError("Diffusion engine is shut down")
+        self.engine.executor.check_health()
+
     async def remove_lora(self, adapter_id: int) -> bool:
         """Remove a LoRA"""
         loop = asyncio.get_event_loop()
