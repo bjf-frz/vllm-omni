@@ -742,11 +742,18 @@ class AsyncOmni(EngineClient, OmniBase):
         Mirrors vLLM's ``AsyncLLM.errored``.  True when the orchestrator
         thread is dead **or** any stage client has been marked dead (e.g.
         diffusion worker OOM / process death).
+
+        Checks both ``_engine_dead`` (StageDiffusionClient) and
+        ``resources.engine_dead`` (StageEngineCoreClient / AsyncMPClient)
+        since the two client types store the flag differently.
         """
         if not self.engine.is_alive():
             return True
         for stage_client in self.engine.stage_clients:
             if getattr(stage_client, "_engine_dead", False):
+                return True
+            resources = getattr(stage_client, "resources", None)
+            if resources is not None and getattr(resources, "engine_dead", False):
                 return True
         return False
 
