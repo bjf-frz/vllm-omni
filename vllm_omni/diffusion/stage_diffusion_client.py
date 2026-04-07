@@ -398,7 +398,12 @@ class StageDiffusionClient:
         Mirrors the ``check_health`` protocol on vLLM's ``EngineClient``.
         """
         if self._engine_dead:
-            raise EngineDeadError()
+            raise EngineDeadError(f"Stage-{self.stage_id} diffusion subprocess is dead")
+        if self._proc is not None and not self._proc.is_alive():
+            self._engine_dead = True
+            raise EngineDeadError(
+                f"Stage-{self.stage_id} diffusion subprocess is not alive (exit code: {self._proc.exitcode})."
+            )
 
     def shutdown(self) -> None:
         self._shutting_down = True
