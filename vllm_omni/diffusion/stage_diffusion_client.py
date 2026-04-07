@@ -109,7 +109,10 @@ class StageDiffusionClient:
         self_ref = weakref.ref(self)
 
         def _monitor() -> None:
-            multiprocessing.connection.wait([proc.sentinel])
+            try:
+                multiprocessing.connection.wait([proc.sentinel])
+            except Exception:
+                return
             client = self_ref()
             if client is None or client._shutting_down or client._engine_dead:
                 return
