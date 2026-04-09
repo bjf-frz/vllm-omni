@@ -107,15 +107,15 @@ python end2end.py --output-wav output_audio \
 
 ### 3. Profiling diffusion models
 
-Diffusion profiling is End-to-End, capturing encoding, denoising loops, and decoding. Standalone diffusion scripts use `--profiler-dir` to enable profiling.
+Diffusion profiling is end-to-end, capturing encoding, denoising loops, and decoding. Standalone diffusion scripts enable profiling via vLLM profiler environment variables such as `VLLM_TORCH_PROFILER_DIR`.
 
 **CLI Usage:**
 ```bash
+VLLM_TORCH_PROFILER_DIR=/tmp/wan22_i2v_profile \
 python image_to_video.py \
     --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \
     --image qwen-bear.png \
     --prompt "A cat playing with yarn, smooth motion" \
-    --profiler-dir \
     \
     # Minimize Spatial Dimensions (Optional but helpful):
     #    Drastically reduces memory usage so the profiler doesn't
@@ -157,7 +157,7 @@ python image_to_video.py \
 
 ### 4. Profiling Online Serving
 
-When `profiler_config` is set in the stage YAML, the server automatically exposes `/start_profile` and `/stop_profile` HTTP endpoints.
+When `profiler_config` is set in the stage YAML, or passed through `--profiler-config` for a single-stage diffusion model, the server automatically exposes `/start_profile` and `/stop_profile` HTTP endpoints.
 
 **1. Start the server** with a stage YAML that has `profiler_config` enabled:
 ```bash
@@ -170,8 +170,25 @@ vllm serve Qwen/Qwen2.5-Omni-7B \
 Or for one stage diffusion models:
 
 ```bash
-vllm serve Wan-AI/Wan2.2-I2V-A14B-Diffusers --omni --port 8091 --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile"}'
+vllm serve Wan-AI/Wan2.2-I2V-A14B-Diffusers \
+    --omni \
+    --port 8091 \
+    --profiler-config '{
+        "profiler": "torch",
+        "torch_profiler_dir": "/tmp/vllm_profile_wan22_i2v",
+        "torch_profiler_with_stack": true,
+        "torch_profiler_with_flops": false,
+        "torch_profiler_use_gzip": true,
+        "torch_profiler_dump_cuda_time_total": true,
+        "torch_profiler_record_shapes": true,
+        "torch_profiler_with_memory": true,
+        "ignore_frontend": false,
+        "delay_iterations": 0,
+        "max_iterations": 0
+    }'
 ```
+
+Use an absolute path for `torch_profiler_dir`. For demo runs, prefer smaller frame counts and fewer denoising steps to keep traces manageable.
 
 **2. Start profiling** by sending a POST request:
 ```bash
@@ -186,6 +203,24 @@ curl -X POST http://localhost:8091/start_profile \
 
 **3. Send your inference requests** as normal while the profiler is running.
 
+For example, a minimal Wan2.2 I2V demo request:
+
+```bash
+curl -X POST http://localhost:8091/v1/videos \
+    -H "Accept: application/json" \
+    -F "prompt=A rabbit looks at the camera, ears twitching slightly, blue sky background, natural documentary style." \
+    -F "negative_prompt=blurry, overexposed, low quality, watermark, subtitle, deformation" \
+    -F "input_reference=@rabbit.png" \
+    -F "size=832x480" \
+    -F "fps=16" \
+    -F "num_frames=17" \
+    -F "guidance_scale=3.5" \
+    -F "guidance_scale_2=3.5" \
+    -F "flow_shift=12.0" \
+    -F "num_inference_steps=2" \
+    -F "seed=42"
+```
+
 **4. Stop profiling** and collect traces:
 ```bash
 # Stop all stages
@@ -197,7 +232,7 @@ curl -X POST http://localhost:8091/stop_profile \
     -d '{"stages": [0]}'
 ```
 
-Trace files are written to the `torch_profiler_dir` specified in your stage YAML.
+Trace files are written to the `torch_profiler_dir` specified in your stage YAML or `--profiler-config`.
 
 > **Important:** Always stop the same stages you started. Stopping a stage that was never started will produce errors.
 
@@ -207,6 +242,8 @@ Output files are saved to the `torch_profiler_dir` specified in your stage YAML 
 
 **Output**
 **Chrome Trace** (`.json.gz`): Visual timeline of kernels and stages. Open in Perfetto UI.
+**Excel Workbook** (`ops_rank*.xlsx`): Consolidated operator tables, including summary, grouped-by-shape, and grouped-by-stack views.
+**Stack Exports** (`stacks_cpu_rank*.txt`, `stacks_cuda_rank*.txt`): Raw stack exports for CPU and CUDA time analysis when stack capture is enabled.
 
 **Viewing Tools:**
 

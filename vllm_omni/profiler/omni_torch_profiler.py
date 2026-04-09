@@ -411,11 +411,6 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
 
         # 1) Summary op table
         summary_events = self.profiler.key_averages()
-        summary_table = summary_events.table(
-            sort_by=sort_key,
-            row_limit=-1,
-        )
-        self._table_path = self._write_text_artifact("ops_summary", summary_table)
         excel_sheets["summary"] = self._event_list_to_rows(summary_events)
 
         # 2) Shape-grouped op table
@@ -424,11 +419,6 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
                 shape_events = self.profiler.key_averages(
                     group_by_input_shape=True,
                 )
-                shape_table = shape_events.table(
-                    sort_by=sort_key,
-                    row_limit=-1,
-                )
-                self._write_text_artifact("ops_by_shape", shape_table)
                 excel_sheets["by_shape"] = self._event_list_to_rows(shape_events)
             except Exception as e:
                 logger.warning(
@@ -443,11 +433,6 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
                 stack_events = self.profiler.key_averages(
                     group_by_stack_n=8,
                 )
-                stack_table = stack_events.table(
-                    sort_by=sort_key,
-                    row_limit=-1,
-                )
-                self._write_text_artifact("ops_by_stack", stack_table)
                 excel_sheets["by_stack"] = self._event_list_to_rows(stack_events)
             except Exception as e:
                 logger.warning(
@@ -479,7 +464,7 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
                     logger.warning("[Rank %s] export_stacks(cuda) failed: %s", rank, e)
 
         try:
-            self._write_excel_artifact("ops", excel_sheets)
+            self._table_path = self._write_excel_artifact("ops", excel_sheets)
         except Exception as e:
             logger.warning("[Rank %s] Failed to export Excel workbook: %s", rank, e)
 

@@ -389,15 +389,15 @@ def test_stop_always_dumps_memory_snapshot_on_success_path(wrapper, monkeypatch)
     assert record_calls[-1][1]["enabled"] is None
 
 
-def test_on_stop_hook_generates_txt_stack_and_excel(wrapper):
+def test_on_stop_hook_generates_stack_and_excel_artifacts(wrapper):
     wrapper.set_trace_filename("case_artifacts")
     wrapper._on_stop_hook()
 
     session_dir = Path(wrapper._session_dir)
 
-    assert (session_dir / "ops_summary_rank0.txt").exists()
-    assert (session_dir / "ops_by_shape_rank0.txt").exists()
-    assert (session_dir / "ops_by_stack_rank0.txt").exists()
+    assert not (session_dir / "ops_summary_rank0.txt").exists()
+    assert not (session_dir / "ops_by_shape_rank0.txt").exists()
+    assert not (session_dir / "ops_by_stack_rank0.txt").exists()
     assert (session_dir / "stacks_cpu_rank0.txt").exists()
     assert (session_dir / "stacks_cuda_rank0.txt").exists()
     assert (session_dir / "ops_rank0.xlsx").exists()
@@ -461,6 +461,8 @@ def test_get_results_returns_all_artifact_paths(wrapper, monkeypatch):
     assert "memory_snapshot" in results
     assert Path(results["session_dir"]).exists()
     assert Path(results["ops"]).exists()
+    assert Path(results["table"]).exists()
+    assert Path(results["table"]).name == "ops_rank0.xlsx"
     assert Path(results["memory_snapshot"]).exists()
 
 
