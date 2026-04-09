@@ -188,7 +188,12 @@ vllm serve Wan-AI/Wan2.2-I2V-A14B-Diffusers \
     }'
 ```
 
-Use an absolute path for `torch_profiler_dir`. For demo runs, prefer smaller frame counts and fewer denoising steps to keep traces manageable.
+* torch_profiler_with_stack: records stack traces, which helps map profile events back to code paths.
+* torch_profiler_with_flops: disables FLOPs counting.
+* torch_profiler_use_gzip: saves the profiler traces in gzip-compressed format.
+* torch_profiler_dump_cuda_time_total: dumps total CUDA time information in the torch profiler traces.
+* torch_profiler_record_shapes: records tensor shapes in the profiler output.
+* torch_profiler_with_memory: enables memory profiling.
 
 **2. Start profiling** by sending a POST request:
 ```bash
