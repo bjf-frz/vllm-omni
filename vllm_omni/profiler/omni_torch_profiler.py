@@ -67,6 +67,8 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
         self._session_dir: str | None = None
         self._artifact_paths: dict[str, str | None] = {}
         self._memory_history_enabled = False
+        self._memory_history_backend: str | None = None
+        self._memory_history_module = None
 
         if local_rank in (None, 0):
             logger.info_once(
@@ -197,16 +199,25 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
             logger.warning("[Rank %s] Failed to export trace: %s", rank, e)
 
     def _try_enable_memory_history(self) -> None:
-        """Enable CUDA memory history for snapshot-based analysis only."""
+        """Enable backend-specific memory history for snapshot analysis."""
         if not self.profiler_config.torch_profiler_with_memory:
             return
-        if not self._has_cuda_like_activity():
+
+        backend_name, memory_module = self._resolve_memory_history_backend()
+        if backend_name is None or memory_module is None:
             return
-        if not torch.cuda.is_available():
+
+        record_memory_history = getattr(memory_module, "_record_memory_history", None)
+        if record_memory_history is None:
+            logger.info(
+                "[Rank %s] %s memory history is not supported on this platform",
+                self._rank(),
+                backend_name,
+            )
             return
 
         try:
-            torch.cuda.memory._record_memory_history(
+            record_memory_history(
                 enabled="all",
                 context="all",
                 stacks="python",
@@ -214,40 +225,89 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
                 clear_history=True,
             )
             self._memory_history_enabled = True
-            logger.info("[Rank %s] CUDA memory history enabled", self._rank())
+            self._memory_history_backend = backend_name
+            self._memory_history_module = memory_module
+            logger.info("[Rank %s] %s memory history enabled", self._rank(), backend_name)
         except Exception as e:
             logger.warning(
-                "[Rank %s] Failed to enable CUDA memory history: %s",
+                "[Rank %s] Failed to enable %s memory history: %s",
                 self._rank(),
+                backend_name,
                 e,
             )
 
     def _try_dump_memory_snapshot(self) -> None:
-        """Dump CUDA memory snapshot into the current session directory."""
+        """Dump a backend-specific memory snapshot into the session directory."""
         if not self._memory_history_enabled:
             return
 
         try:
+            if self._memory_history_module is None or self._memory_history_backend is None:
+                return
+
+            dump_snapshot = getattr(self._memory_history_module, "_dump_snapshot", None)
+            if dump_snapshot is None:
+                logger.info(
+                    "[Rank %s] %s memory snapshot is not supported on this platform",
+                    self._rank(),
+                    self._memory_history_backend,
+                )
+                return
+
             snapshot_file = self._artifact_path("memory_snapshot", ".pickle")
-            torch.cuda.memory._dump_snapshot(snapshot_file)
+            dump_snapshot(snapshot_file)
             self._artifact_paths["memory_snapshot"] = snapshot_file
             logger.info(
-                "[Rank %s] Memory snapshot dumped to %s",
+                "[Rank %s] %s memory snapshot dumped to %s",
                 self._rank(),
+                self._memory_history_backend,
                 snapshot_file,
             )
         except Exception as e:
             logger.warning(
-                "[Rank %s] Failed to dump CUDA memory snapshot: %s",
+                "[Rank %s] Failed to dump %s memory snapshot: %s",
                 self._rank(),
+                self._memory_history_backend,
                 e,
             )
         finally:
             try:
-                torch.cuda.memory._record_memory_history(enabled=None)
+                if self._memory_history_module is not None:
+                    disable_memory_history = getattr(
+                        self._memory_history_module,
+                        "_record_memory_history",
+                        None,
+                    )
+                    if disable_memory_history is not None:
+                        disable_memory_history(enabled=None)
             except Exception:
                 pass
             self._memory_history_enabled = False
+            self._memory_history_backend = None
+            self._memory_history_module = None
+
+    def _resolve_memory_history_backend(self) -> tuple[str | None, Any]:
+        """Resolve the memory backend that supports history/snapshot APIs."""
+        backend_specs = [
+            ("CUDA", self._has_cuda_like_activity(), getattr(torch, "cuda", None)),
+            ("NPU", "NPU" in self._activities, getattr(torch, "npu", None)),
+            ("XPU", "XPU" in self._activities, getattr(torch, "xpu", None)),
+            ("MUSA", "MUSA" in self._activities, getattr(torch, "musa", None)),
+        ]
+
+        for backend_name, enabled, device_module in backend_specs:
+            if not enabled or device_module is None:
+                continue
+
+            is_available = getattr(device_module, "is_available", None)
+            if callable(is_available) and not is_available():
+                continue
+
+            memory_module = getattr(device_module, "memory", None)
+            if memory_module is not None:
+                return backend_name, memory_module
+
+        return None, None
 
     def _safe_get(self, obj, name: str, default=None):
         return getattr(obj, name, default)

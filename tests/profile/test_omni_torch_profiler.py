@@ -4,6 +4,7 @@ from __future__ import annotations
 import gzip
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from openpyxl import load_workbook
@@ -316,6 +317,8 @@ def test_start_skips_memory_history_when_memory_disabled(fake_config, fake_profi
 def test_try_dump_memory_snapshot_writes_pickle(wrapper, monkeypatch):
     wrapper.set_trace_filename("case_snapshot")
     wrapper._memory_history_enabled = True
+    wrapper._memory_history_backend = "CUDA"
+    wrapper._memory_history_module = profiler_mod.torch.cuda.memory
 
     disable_calls = []
 
@@ -459,6 +462,99 @@ def test_get_results_returns_all_artifact_paths(wrapper, monkeypatch):
     assert Path(results["session_dir"]).exists()
     assert Path(results["ops"]).exists()
     assert Path(results["memory_snapshot"]).exists()
+
+
+def test_start_uses_xpu_memory_history_when_available(wrapper, monkeypatch):
+    calls = []
+
+    def fake_record_memory_history(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    fake_memory_module = SimpleNamespace(
+        _record_memory_history=fake_record_memory_history,
+    )
+    monkeypatch.setattr(
+        wrapper,
+        "_resolve_memory_history_backend",
+        lambda: ("XPU", fake_memory_module),
+    )
+
+    wrapper.set_trace_filename("case_xpu_memory_start")
+    wrapper._start()
+
+    assert wrapper._memory_history_enabled is True
+    assert wrapper._memory_history_backend == "XPU"
+    assert wrapper._memory_history_module is fake_memory_module
+    assert calls[0][1]["enabled"] == "all"
+
+
+def test_start_uses_npu_memory_history_when_available(wrapper, monkeypatch):
+    calls = []
+
+    def fake_record_memory_history(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    fake_memory_module = SimpleNamespace(
+        _record_memory_history=fake_record_memory_history,
+    )
+    monkeypatch.setattr(
+        wrapper,
+        "_resolve_memory_history_backend",
+        lambda: ("NPU", fake_memory_module),
+    )
+
+    wrapper.set_trace_filename("case_npu_memory_start")
+    wrapper._start()
+
+    assert wrapper._memory_history_enabled is True
+    assert wrapper._memory_history_backend == "NPU"
+    assert wrapper._memory_history_module is fake_memory_module
+    assert calls[0][1]["enabled"] == "all"
+
+
+def test_start_skips_memory_history_when_backend_api_missing(wrapper, monkeypatch):
+    fake_memory_module = SimpleNamespace()
+    monkeypatch.setattr(
+        wrapper,
+        "_resolve_memory_history_backend",
+        lambda: ("XPU", fake_memory_module),
+    )
+
+    wrapper.set_trace_filename("case_missing_memory_api")
+    wrapper._start()
+
+    assert wrapper._memory_history_enabled is False
+    assert wrapper._memory_history_backend is None
+    assert wrapper._memory_history_module is None
+
+
+def test_try_dump_memory_snapshot_uses_resolved_backend_module(wrapper):
+    wrapper.set_trace_filename("case_xpu_snapshot")
+    wrapper._memory_history_enabled = True
+    wrapper._memory_history_backend = "XPU"
+
+    calls = []
+
+    def fake_record_memory_history(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    def fake_dump_snapshot(path):
+        Path(path).write_bytes(b"xpu snapshot bytes")
+
+    wrapper._memory_history_module = SimpleNamespace(
+        _record_memory_history=fake_record_memory_history,
+        _dump_snapshot=fake_dump_snapshot,
+    )
+
+    wrapper._try_dump_memory_snapshot()
+
+    snapshot = Path(wrapper._artifact_paths["memory_snapshot"])
+    assert snapshot.exists()
+    assert snapshot.read_bytes() == b"xpu snapshot bytes"
+    assert calls[-1][1]["enabled"] is None
+    assert wrapper._memory_history_enabled is False
+    assert wrapper._memory_history_backend is None
+    assert wrapper._memory_history_module is None
 
 
 def test_event_list_to_rows_contains_expected_fields(wrapper):
