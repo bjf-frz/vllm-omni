@@ -747,32 +747,41 @@ def test_async_omni_errored_property_dead_stage():
     assert omni.errored is True
 
 
+def _enqueue_stage_error(
+    engine: FakeAsyncOmniEngine,
+    msg,
+    *,
+    error_text: str,
+    kill_engine: bool = False,
+):
+    """Enqueue a stage error output, optionally killing the engine."""
+    if kill_engine:
+        engine._alive = False
+    engine.output_q.put_nowait(
+        {
+            "type": "output",
+            "request_id": msg["request_id"],
+            "stage_id": 0,
+            "engine_outputs": SimpleNamespace(
+                payload="",
+                finished=True,
+                images=[],
+                stage_durations={},
+                error=error_text,
+            ),
+            "finished": False,
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_async_omni_propagates_engine_dead_error(monkeypatch: pytest.MonkeyPatch):
     """When the engine is dead and an error output arrives, ``generate()``
     must raise ``EngineDeadError`` (not plain ``RuntimeError``)."""
 
-    def _enqueue_stage_error_with_dead_engine(engine: FakeAsyncOmniEngine, msg):
-        engine._alive = False
-        engine.output_q.put_nowait(
-            {
-                "type": "output",
-                "request_id": msg["request_id"],
-                "stage_id": 0,
-                "engine_outputs": SimpleNamespace(
-                    payload="",
-                    finished=True,
-                    images=[],
-                    stage_durations={},
-                    error="worker OOM",
-                ),
-                "finished": False,
-            }
-        )
-
     engine = FakeAsyncOmniEngine(
         stage_metadata=THREE_STAGE_META,
-        on_add_request=_enqueue_stage_error_with_dead_engine,
+        on_add_request=lambda eng, msg: _enqueue_stage_error(eng, msg, error_text="worker OOM", kill_engine=True),
     )
     _patch_engine(monkeypatch, engine)
 
@@ -790,26 +799,9 @@ async def test_async_omni_propagates_engine_generate_error(monkeypatch: pytest.M
     """When the engine is alive but a stage error occurs, ``generate()``
     must raise ``EngineGenerateError`` (recoverable, not ``EngineDeadError``)."""
 
-    def _enqueue_stage_error_with_alive_engine(engine: FakeAsyncOmniEngine, msg):
-        engine.output_q.put_nowait(
-            {
-                "type": "output",
-                "request_id": msg["request_id"],
-                "stage_id": 0,
-                "engine_outputs": SimpleNamespace(
-                    payload="",
-                    finished=True,
-                    images=[],
-                    stage_durations={},
-                    error="diffusion step failed",
-                ),
-                "finished": False,
-            }
-        )
-
     engine = FakeAsyncOmniEngine(
         stage_metadata=THREE_STAGE_META,
-        on_add_request=_enqueue_stage_error_with_alive_engine,
+        on_add_request=lambda eng, msg: _enqueue_stage_error(eng, msg, error_text="diffusion step failed"),
     )
     _patch_engine(monkeypatch, engine)
 
@@ -822,3 +814,33 @@ async def test_async_omni_propagates_engine_generate_error(monkeypatch: pytest.M
         assert str(exc_info.value.__cause__) == "diffusion step failed"
     finally:
         app.shutdown()
+
+
+# ───────── OmniBase.check_health() aggregation ─────────
+
+
+def test_check_health_passes_when_all_healthy():
+    base = _make_base()
+    healthy_stage = MagicMock()
+    healthy_stage.check_health = MagicMock()
+    base.engine.is_alive.return_value = True
+    base.engine.stage_clients = [healthy_stage]
+    base.check_health()  # should not raise
+
+
+def test_check_health_raises_when_stage_dead():
+    base = _make_base()
+    dead_stage = MagicMock()
+    dead_stage.check_health = MagicMock(side_effect=EngineDeadError("Stage-1 dead"))
+    base.engine.is_alive.return_value = True
+    base.engine.stage_clients = [dead_stage]
+    with pytest.raises(EngineDeadError, match="Stage-1 dead"):
+        base.check_health()
+
+
+def test_check_health_raises_when_orchestrator_dead():
+    base = _make_base()
+    base.engine.is_alive.return_value = False
+    base.engine.stage_clients = []
+    with pytest.raises(EngineDeadError, match="not alive"):
+        base.check_health()

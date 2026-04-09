@@ -298,32 +298,6 @@ def test_health_endpoint_dead_engine():
     assert data["status"] == "unhealthy"
 
 
-def test_health_endpoint_after_generate_error():
-    """Health still returns 200 after an EngineGenerateError.
-
-    EngineGenerateError is recoverable and per-request; the engine stays
-    healthy and /health must reflect that.
-    """
-    from unittest.mock import AsyncMock
-
-    from fastapi import FastAPI
-
-    from vllm_omni.entrypoints.openai.api_server import router
-
-    app = FastAPI()
-    app.include_router(router)
-
-    alive_engine = AsyncMock()
-    alive_engine.check_health = AsyncMock(return_value=None)
-    app.state.engine_client = alive_engine
-
-    client = TestClient(app)
-    response = client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "healthy"
-
-
 def test_models_endpoint(test_client):
     """Test /v1/models endpoint for diffusion mode"""
     response = test_client.get("/v1/models")

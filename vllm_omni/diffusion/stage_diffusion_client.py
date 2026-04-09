@@ -315,7 +315,7 @@ class StageDiffusionClient:
         except asyncio.QueueEmpty:
             if self._engine_dead:
                 raise EngineDeadError()
-            if not self._shutting_down and self._proc is not None and not self._proc.is_alive():
+            if not self._shutting_down and not self._proc.is_alive():
                 self._engine_dead = True
                 exitcode = self._proc.exitcode
                 # One final drain – the last ZMQ frame may have arrived
@@ -393,7 +393,7 @@ class StageDiffusionClient:
                     return self._rpc_results.pop(rpc_id)
                 if self._engine_dead:
                     raise EngineDeadError()
-                if self._proc is not None and not self._proc.is_alive():
+                if not self._proc.is_alive():
                     self._engine_dead = True
                     raise EngineDeadError()
                 if deadline and time.monotonic() > deadline:
@@ -409,7 +409,7 @@ class StageDiffusionClient:
         """
         if self._engine_dead:
             raise EngineDeadError(f"Stage-{self.stage_id} diffusion subprocess is dead")
-        if self._proc is not None and not self._proc.is_alive():
+        if not self._proc.is_alive():
             self._engine_dead = True
             raise EngineDeadError(
                 f"Stage-{self.stage_id} diffusion subprocess is not alive (exit code: {self._proc.exitcode})."
@@ -422,7 +422,7 @@ class StageDiffusionClient:
         except Exception:
             pass
 
-        if self._proc is not None and self._proc.is_alive():
+        if self._proc.is_alive():
             self._proc.join(timeout=10)
             terminate_alive_proc(self._proc)
 

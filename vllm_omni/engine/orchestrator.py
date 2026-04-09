@@ -291,7 +291,7 @@ class Orchestrator:
                             )
                             self.request_states.pop(req_id, None)
                     self._shutdown_event.set()
-                    return
+                    raise
                 except Exception:
                     if self._shutdown_event.is_set():
                         return

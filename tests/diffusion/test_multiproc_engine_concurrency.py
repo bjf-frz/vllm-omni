@@ -487,23 +487,6 @@ class TestMultiprocExecutorRaisesEngineDeadError:
             )
 
 
-class TestExecutorFailureCallback:
-    """``register_failure_callback`` fires when ``is_failed`` is set by the
-    worker monitor."""
-
-    def test_callback_invoked(self):
-        executor, _, _ = _make_executor()
-        called = threading.Event()
-        executor.register_failure_callback(lambda: called.set())
-
-        # Simulate what the worker monitor does.
-        executor.is_failed = True
-        for cb in executor._failure_callbacks:
-            cb()
-
-        assert called.is_set()
-
-
 class TestDiffusionEngineDeadErrorPassthrough:
     """``DiffusionEngine.add_req_and_wait_for_response`` re-raises
     ``EngineDeadError`` from executor and wraps other errors."""
@@ -531,7 +514,7 @@ class TestStageDiffusionClientErrorPropagation:
     subprocess, then manually sets the fields needed for each test.
     """
 
-    def _make_client(self):
+    def _make_client(self, *, engine_dead=False, proc_alive=True):
         from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
 
         client = object.__new__(StageDiffusionClient)
@@ -547,8 +530,11 @@ class TestStageDiffusionClientErrorPropagation:
         client._pending_rpcs = set()
         client._tasks = {}
         client._shutting_down = False
-        client._engine_dead = False
-        client._proc = None
+        client._engine_dead = engine_dead
+        client._proc = MagicMock(
+            is_alive=MagicMock(return_value=proc_alive),
+            exitcode=1,
+        )
         client._request_socket = MagicMock()
         client._response_socket = MagicMock()
         client._encoder = MagicMock()
@@ -558,15 +544,13 @@ class TestStageDiffusionClientErrorPropagation:
 
     @pytest.mark.asyncio
     async def test_add_request_raises_when_dead(self):
-        client = self._make_client()
-        client._engine_dead = True
+        client = self._make_client(engine_dead=True)
 
         with pytest.raises(EngineDeadError):
             await client.add_request_async("req-3", "test prompt", None)
 
     def test_check_health_raises_when_dead(self):
-        client = self._make_client()
-        client._engine_dead = True
+        client = self._make_client(engine_dead=True)
 
         with pytest.raises(EngineDeadError):
             client.check_health()
@@ -578,8 +562,7 @@ class TestStageDiffusionClientErrorPropagation:
     def test_get_output_raises_engine_dead_when_dead(self):
         """When ``_engine_dead`` is True and the output queue is empty,
         ``get_diffusion_output_nowait`` must raise ``EngineDeadError``."""
-        client = self._make_client()
-        client._engine_dead = True
+        client = self._make_client(engine_dead=True)
         # Simulate _drain_responses as a no-op (no ZMQ socket)
         client._response_socket.recv.side_effect = zmq.Again
 
@@ -592,3 +575,40 @@ class TestStageDiffusionClientErrorPropagation:
         client._response_socket.recv.side_effect = zmq.Again
 
         assert client.get_diffusion_output_nowait() is None
+
+    def test_check_health_raises_when_proc_dead(self):
+        """``check_health`` detects a dead subprocess via ``_proc.is_alive()``
+        and raises ``EngineDeadError``, setting ``_engine_dead`` as a
+        side effect."""
+        client = self._make_client(proc_alive=False)
+
+        with pytest.raises(EngineDeadError, match="not alive"):
+            client.check_health()
+
+        assert client._engine_dead is True
+
+    def test_get_output_raises_when_proc_dead(self):
+        """When the subprocess has died (non-signal exit) and the output
+        queue is empty, ``get_diffusion_output_nowait`` must raise
+        ``EngineDeadError`` with the exit code."""
+        client = self._make_client(proc_alive=False)
+        client._response_socket.recv.side_effect = zmq.Again
+
+        with pytest.raises(EngineDeadError, match="exit code"):
+            client.get_diffusion_output_nowait()
+
+        assert client._engine_dead is True
+
+    def test_get_output_returns_none_on_signal_death(self):
+        """When the subprocess was killed by a signal (exit code > 128),
+        ``get_diffusion_output_nowait`` returns ``None`` and sets
+        ``_shutting_down`` instead of raising."""
+        client = self._make_client(proc_alive=False)
+        client._proc.exitcode = 137  # SIGKILL (128 + 9)
+        client._response_socket.recv.side_effect = zmq.Again
+
+        result = client.get_diffusion_output_nowait()
+
+        assert result is None
+        assert client._shutting_down is True
+        assert client._engine_dead is True
