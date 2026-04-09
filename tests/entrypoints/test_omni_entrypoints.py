@@ -10,6 +10,7 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
+from vllm_omni.diffusion.data import OmniRequestError
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.omni import Omni
 
@@ -540,11 +541,15 @@ async def test_async_omni_propagates_engine_error(monkeypatch: pytest.MonkeyPatc
 
     app = AsyncOmni("dummy-model")
     try:
-        with pytest.raises(RuntimeError, match="engine boom"):
+        with pytest.raises(OmniRequestError, match="engine boom") as exc_info:
             async for _ in app.generate(prompt="hello", request_id="req-1"):
                 pass
     finally:
         app.shutdown()
+
+    assert exc_info.value.request_id == "req-1"
+    assert exc_info.value.stage_id == 0
+    assert exc_info.value.status_code == 500
 
 
 def test_omni_generate_py_generator_yields_final_outputs_for_each_request(monkeypatch: pytest.MonkeyPatch):

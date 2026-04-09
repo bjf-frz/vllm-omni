@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from vllm_omni.diffusion.data import DiffusionOutput
+from vllm_omni.diffusion.data import DiffusionOutput, OmniRequestError, normalize_omni_error
 from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.sched import (
@@ -245,6 +245,39 @@ class TestDiffusionEngine:
         assert output is expected
         engine.executor.add_req.assert_called_once_with(request)
 
+    def test_add_req_and_wait_for_response_wraps_executor_errors(self) -> None:
+        engine = DiffusionEngine.__new__(DiffusionEngine)
+        engine.scheduler = RequestScheduler()
+        engine.scheduler.initialize(Mock())
+        engine.executor = Mock()
+        engine.executor.add_req.side_effect = RuntimeError("worker oom")
+        engine._rpc_lock = threading.Lock()
+
+        request = _make_request("engine-error")
+
+        with pytest.raises(OmniRequestError, match="worker oom") as exc_info:
+            engine.add_req_and_wait_for_response(request)
+
+        assert exc_info.value.error_type == "RuntimeError"
+
+    def test_add_req_and_wait_for_response_raises_scheduler_error_when_empty_without_requests(self) -> None:
+        engine = DiffusionEngine.__new__(DiffusionEngine)
+        engine.scheduler = Mock()
+        engine.scheduler.add_request.return_value = "sched-1"
+        engine.scheduler.schedule.return_value = Mock(is_empty=True)
+        engine.scheduler.has_requests.return_value = False
+        engine.scheduler.pop_request_state.return_value = None
+        engine.executor = Mock()
+        engine._rpc_lock = threading.Lock()
+
+        request = _make_request("engine-empty")
+
+        with pytest.raises(OmniRequestError, match="no runnable requests") as exc_info:
+            engine.add_req_and_wait_for_response(request)
+
+        assert exc_info.value.error_type == "SchedulerError"
+        engine.scheduler.pop_request_state.assert_called_once_with("sched-1")
+
     def test_supports_scheduler_interface_injection(self) -> None:
         request = _make_request("engine_iface")
         expected = DiffusionOutput(output=None)
@@ -297,3 +330,15 @@ class TestDiffusionEngine:
 
         with pytest.raises(RuntimeError, match="Dummy run failed: boom"):
             engine._dummy_run()
+
+
+def test_normalize_omni_error_preserves_existing_metadata() -> None:
+    err = OmniRequestError("boom", status_code=409, error_type="Conflict")
+
+    normalized = normalize_omni_error(err, request_id="req-1", stage_id=3)
+
+    assert normalized is err
+    assert normalized.request_id == "req-1"
+    assert normalized.stage_id == 3
+    assert normalized.status_code == 409
+    assert normalized.error_type == "Conflict"

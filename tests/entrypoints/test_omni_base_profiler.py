@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm_omni.diffusion.data import OmniRequestError
+
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
@@ -203,6 +205,45 @@ class TestOmniBaseProfilerSignatureConsistency:
         assert sig.parameters["profile_prefix"].default is None
         # stages should default to None
         assert sig.parameters["stages"].default is None
+
+
+class TestOmniBaseOutputHandling:
+    def test_handle_output_message_raises_structured_omni_error(self):
+        mock_engine = MagicMock()
+        mock_engine.num_stages = 1
+        mock_engine.default_sampling_params_list = [MagicMock()]
+        mock_engine.get_stage_metadata.return_value = {
+            "final_output_type": "image",
+            "final_output": True,
+        }
+
+        with (
+            patch("vllm_omni.entrypoints.omni_base.AsyncOmniEngine", return_value=mock_engine),
+            patch("vllm_omni.entrypoints.omni_base.omni_snapshot_download", side_effect=lambda x: x),
+            patch("vllm_omni.entrypoints.omni_base.weakref.finalize"),
+        ):
+            from vllm_omni.entrypoints.omni_base import OmniBase
+
+            omni_base = OmniBase(model="test-model")
+
+        with pytest.raises(OmniRequestError, match="oom") as exc_info:
+            omni_base._handle_output_message(
+                {
+                    "type": "error",
+                    "error": "oom",
+                    "status_code": 507,
+                    "request_id": "req-1",
+                    "stage_id": 2,
+                    "error_type": "OutOfMemoryError",
+                    "detail": {"retryable": False},
+                }
+            )
+
+        assert exc_info.value.status_code == 507
+        assert exc_info.value.request_id == "req-1"
+        assert exc_info.value.stage_id == 2
+        assert exc_info.value.error_type == "OutOfMemoryError"
+        assert exc_info.value.detail == {"retryable": False}
 
     def test_stop_profile_default_values(self):
         """Verify stop_profile has correct default parameter values."""

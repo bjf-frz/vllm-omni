@@ -15,10 +15,12 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 from pytest_mock import MockerFixture
 
+from vllm_omni.diffusion.data import OmniRequestError
 from vllm_omni.entrypoints.openai import api_server
 from vllm_omni.entrypoints.openai.api_server import router
 from vllm_omni.entrypoints.openai.protocol.videos import (
@@ -29,6 +31,7 @@ from vllm_omni.entrypoints.openai.protocol.videos import (
 from vllm_omni.entrypoints.openai.serving_video import OmniOpenAIServingVideo
 from vllm_omni.entrypoints.openai.storage import LocalStorageManager
 from vllm_omni.entrypoints.openai.stores import AsyncDictStore, TaskRegistry
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -54,6 +57,18 @@ class FakeAsyncOmni:
         num_outputs = sampling_params_list[0].num_outputs_per_prompt
         videos = [object() for _ in range(num_outputs)]
         yield MockVideoResult(videos)
+
+
+class ErrorAsyncOmni(FakeAsyncOmni):
+    def __init__(self, exc: Exception):
+        super().__init__()
+        self._exc = exc
+
+    async def generate(self, prompt, request_id, sampling_params_list):
+        self.captured_prompt = prompt
+        self.captured_sampling_params_list = sampling_params_list
+        raise self._exc
+        yield  # pragma: no cover
 
 
 class BlockingVideoHandler:
@@ -735,3 +750,37 @@ def test_extra_params_merged_with_existing_extra_args(test_client, mocker: Mocke
     assert captured.extra_args["flow_shift"] == 0.5
     assert captured.extra_args["use_zero_init"] is True
     assert captured.extra_args["zero_steps"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_generation_maps_omni_request_error_to_http_exception():
+    serving = OmniOpenAIServingVideo.for_diffusion(
+        diffusion_engine=ErrorAsyncOmni(
+            OmniRequestError(
+                "oom",
+                status_code=507,
+                request_id="req-oom",
+                stage_id=2,
+                error_type="OutOfMemoryError",
+                detail={"retryable": False},
+            )
+        ),
+        model_name="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await serving._run_generation(
+            {"prompt": "test"},
+            OmniDiffusionSamplingParams(),
+            "req-oom",
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 507
+    assert exc.detail == {
+        "message": "oom",
+        "request_id": "req-oom",
+        "stage_id": 2,
+        "error_type": "OutOfMemoryError",
+        "detail": {"retryable": False},
+    }
