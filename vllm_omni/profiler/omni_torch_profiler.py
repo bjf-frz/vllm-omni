@@ -8,7 +8,6 @@ import subprocess
 from datetime import datetime
 from typing import Literal
 
-import pandas as pd
 import torch
 from typing_extensions import override
 from vllm.config import ProfilerConfig
@@ -343,6 +342,16 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
 
     def _write_excel_artifact(self, name: str, sheets: dict[str, list[dict]]) -> str:
         path = self._artifact_path(name, ".xlsx")
+
+        try:
+            import pandas as pd
+        except Exception as e:
+            logger.warning(
+                "[Rank %s] pandas not available, skip Excel export: %s",
+                self._rank(),
+                e,
+            )
+            return path
 
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             for sheet_name, rows in sheets.items():
