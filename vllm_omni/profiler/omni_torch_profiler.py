@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import subprocess
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from typing_extensions import override
