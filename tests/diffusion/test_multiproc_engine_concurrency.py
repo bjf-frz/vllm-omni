@@ -531,6 +531,7 @@ class TestStageDiffusionClientErrorPropagation:
         client._tasks = {}
         client._shutting_down = False
         client._engine_dead = engine_dead
+        client._owns_process = True
         client._proc = MagicMock(
             is_alive=MagicMock(return_value=proc_alive),
             exitcode=1,
