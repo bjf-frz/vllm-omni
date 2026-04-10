@@ -445,7 +445,7 @@ class StageDiffusionClient:
         """
         if self._engine_dead:
             raise EngineDeadError(f"Stage-{self.stage_id} diffusion subprocess is dead")
-        if not self._proc.is_alive():
+        if self._proc is not None and not self._proc.is_alive():
             self._engine_dead = True
             raise EngineDeadError(
                 f"Stage-{self.stage_id} diffusion subprocess is not alive (exit code: {self._proc.exitcode})."
