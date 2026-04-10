@@ -844,3 +844,113 @@ def test_check_health_raises_when_orchestrator_dead():
     base.engine.stage_clients = []
     with pytest.raises(EngineDeadError, match="not alive"):
         base.check_health()
+
+
+# ───────── OmniBase.errored property ─────────
+
+
+def test_omni_base_errored_false_when_alive():
+    base = _make_base()
+    base.engine.is_alive.return_value = True
+    base.engine.stage_clients = [SimpleNamespace()]
+    assert base.errored is False
+
+
+def test_omni_base_errored_true_when_orchestrator_dead():
+    base = _make_base()
+    base.engine.is_alive.return_value = False
+    base.engine.stage_clients = []
+    assert base.errored is True
+
+
+def test_omni_base_errored_true_when_stage_engine_dead():
+    base = _make_base()
+    base.engine.is_alive.return_value = True
+    dead_stage = SimpleNamespace(_engine_dead=True)
+    base.engine.stage_clients = [dead_stage]
+    assert base.errored is True
+
+
+def test_omni_base_errored_true_when_stage_resources_engine_dead():
+    base = _make_base()
+    base.engine.is_alive.return_value = True
+    dead_stage = SimpleNamespace(resources=SimpleNamespace(engine_dead=True))
+    base.engine.stage_clients = [dead_stage]
+    assert base.errored is True
+
+
+# ───────── Omni (sync) EngineDeadError / EngineGenerateError ─────────
+
+
+def test_omni_propagates_engine_dead_error(monkeypatch: pytest.MonkeyPatch):
+    """When the engine is dead and a stage error output arrives,
+    ``Omni.generate()`` must raise ``EngineDeadError``."""
+    engine = FakeAsyncOmniEngine(
+        stage_metadata=THREE_STAGE_META,
+        on_add_request=lambda eng, msg: _enqueue_stage_error(eng, msg, error_text="worker OOM", kill_engine=True),
+    )
+    _patch_engine(monkeypatch, engine)
+
+    app = Omni("dummy-model")
+    try:
+        with pytest.raises(EngineDeadError, match="worker OOM"):
+            list(app.generate(["hello"], py_generator=False, use_tqdm=False))
+    finally:
+        app.shutdown()
+
+
+def test_omni_propagates_engine_generate_error(monkeypatch: pytest.MonkeyPatch):
+    """When the engine is alive but a stage error occurs,
+    ``Omni.generate()`` must raise ``EngineGenerateError`` (recoverable)."""
+    engine = FakeAsyncOmniEngine(
+        stage_metadata=THREE_STAGE_META,
+        on_add_request=lambda eng, msg: _enqueue_stage_error(eng, msg, error_text="diffusion step failed"),
+    )
+    _patch_engine(monkeypatch, engine)
+
+    app = Omni("dummy-model")
+    try:
+        with pytest.raises(EngineGenerateError) as exc_info:
+            list(app.generate(["hello"], py_generator=False, use_tqdm=False))
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert str(exc_info.value.__cause__) == "diffusion step failed"
+    finally:
+        app.shutdown()
+
+
+def test_omni_errored_property_alive(monkeypatch: pytest.MonkeyPatch):
+    """Omni.errored (inherited from OmniBase) returns False when healthy."""
+    engine = FakeAsyncOmniEngine(stage_metadata=THREE_STAGE_META)
+    _patch_engine(monkeypatch, engine)
+
+    app = Omni("dummy-model")
+    try:
+        assert app.errored is False
+    finally:
+        app.shutdown()
+
+
+def test_omni_errored_property_dead_engine(monkeypatch: pytest.MonkeyPatch):
+    """Omni.errored returns True when the orchestrator is dead."""
+    engine = FakeAsyncOmniEngine(stage_metadata=THREE_STAGE_META)
+    _patch_engine(monkeypatch, engine)
+
+    app = Omni("dummy-model")
+    try:
+        engine._alive = False
+        assert app.errored is True
+    finally:
+        app.shutdown()
+
+
+def test_omni_errored_property_dead_stage(monkeypatch: pytest.MonkeyPatch):
+    """Omni.errored returns True when a stage client is marked dead."""
+    engine = FakeAsyncOmniEngine(stage_metadata=THREE_STAGE_META)
+    _patch_engine(monkeypatch, engine)
+
+    app = Omni("dummy-model")
+    try:
+        engine.stage_clients[0]._engine_dead = True
+        assert app.errored is True
+    finally:
+        app.shutdown()

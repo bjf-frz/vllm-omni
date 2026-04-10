@@ -22,7 +22,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_omni.entrypoints.client_request_state import ClientRequestState
 from vllm_omni.entrypoints.omni_base import OmniBase
@@ -434,19 +434,7 @@ class AsyncOmni(EngineClient, OmniBase):
                 )
                 raise RuntimeError(result)
 
-            engine_outputs = result.get("engine_outputs")
-            error_text = getattr(engine_outputs, "error", None)
-            if error_text is not None:
-                logger.error(
-                    "[AsyncOmni] Stage error for req=%s stage-%s: %s",
-                    request_id,
-                    stage_id,
-                    error_text,
-                )
-                # NOTE: O(n_stages) check for every error.
-                if self.errored:
-                    raise EngineDeadError(error_text)
-                raise EngineGenerateError() from RuntimeError(error_text)
+            self._check_engine_output_error(result, request_id, stage_id)
 
             # Process the result (constructs OmniRequestOutput)
             output_to_yield = self._process_single_result(
@@ -739,23 +727,13 @@ class AsyncOmni(EngineClient, OmniBase):
     def errored(self) -> bool:
         """Whether the engine is in a non-recoverable error state.
 
-        Mirrors vLLM's ``AsyncLLM.errored``.  True when the orchestrator
-        thread is dead **or** any stage client has been marked dead (e.g.
-        diffusion worker OOM / process death).
-
-        Checks both ``_engine_dead`` (StageDiffusionClient) and
-        ``resources.engine_dead`` (StageEngineCoreClient / AsyncMPClient)
-        since the two client types store the flag differently.
+        Delegates to ``OmniBase.errored`` which checks the orchestrator
+        thread and all stage clients.  Redeclared here to satisfy the
+        ``EngineClient`` abstract-property requirement (Python's ABC
+        mechanism does not resolve abstract methods from sibling MRO
+        entries).
         """
-        if not self.engine.is_alive():
-            return True
-        for stage_client in self.engine.stage_clients:
-            if getattr(stage_client, "_engine_dead", False):
-                return True
-            resources = getattr(stage_client, "resources", None)
-            if resources is not None and getattr(resources, "engine_dead", False):
-                return True
-        return False
+        return OmniBase.errored.fget(self)  # type: ignore[union-attr]
 
     @property
     def is_stopped(self) -> bool:
