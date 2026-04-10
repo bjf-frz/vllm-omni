@@ -121,7 +121,9 @@ def test_diffuse_runs_prediction_and_scheduler_for_each_timestep() -> None:
         return torch.full_like(latents, float(timestep[0].item()))
 
     def _fake_scheduler_step_maybe_with_cfg(noise_pred, t, current_latents, do_true_cfg):
-        scheduler_calls.append((float(noise_pred[0, 0, 0, 0, 0]), int(t.item()), float(current_latents.sum()), do_true_cfg))
+        scheduler_calls.append(
+            (float(noise_pred[0, 0, 0, 0, 0]), int(t.item()), float(current_latents.sum()), do_true_cfg)
+        )
         return current_latents + noise_pred
 
     pipeline.predict_noise_maybe_with_cfg = _fake_predict_noise_maybe_with_cfg  # type: ignore[method-assign]
