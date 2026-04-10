@@ -98,9 +98,6 @@ async def test_engine_dead_error_broadcasts_fatal_and_shuts_down(orchestrator_fa
             final_stage_id=0,
         )
 
-        # Wait for the request to be submitted to the stage client.
-        await _wait_for(lambda: len(stage0.add_request_calls) == 1)
-
         # Collect the fatal error message.
         msg = await _get_any_output_message(orchestrator_fixture)
 
