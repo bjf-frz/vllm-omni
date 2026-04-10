@@ -379,9 +379,6 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
                         raise RuntimeError("No transformer available for high-noise stage")
 
                 if self.expand_timesteps and latent_condition is not None:
-                    if first_frame_mask is None:
-                        raise RuntimeError("first_frame_mask is required when latent_condition is provided")
-
                     # I2V mode: blend condition with latents using mask
                     latent_model_input = (1 - first_frame_mask) * latent_condition + first_frame_mask * latents
                     latent_model_input = latent_model_input.to(dtype)
