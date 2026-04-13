@@ -76,7 +76,7 @@ def test_fatal_error_message_surfaces_through_try_get_output(mocker: MockerFixtu
     mock_queue = mocker.MagicMock()
     mock_queue.sync_q.get.return_value = fatal_msg
 
-    engine = _make_engine(mock_queue, thread_alive=False)
+    engine = _make_engine(mock_queue, mocker, thread_alive=False)
 
     msg = engine.try_get_output()
     assert msg is not None
@@ -93,7 +93,7 @@ async def test_fatal_error_message_surfaces_through_try_get_output_async(mocker:
     mock_queue = mocker.MagicMock()
     mock_queue.sync_q.get_nowait.return_value = fatal_msg
 
-    engine = _make_engine(mock_queue, thread_alive=False)
+    engine = _make_engine(mock_queue, mocker, thread_alive=False)
 
     msg = await engine.try_get_output_async()
     assert msg is not None
