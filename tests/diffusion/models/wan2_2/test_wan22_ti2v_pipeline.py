@@ -72,7 +72,9 @@ def test_ti2v_diffuse_without_image_condition_expands_patch_timesteps() -> None:
     positive = calls[0]["positive_kwargs"]
     assert calls[0]["do_true_cfg"] is True
     assert positive["timestep"].shape == (1, 8)
-    torch.testing.assert_close(positive["timestep"], torch.full((1, 8), 7))
+    torch.testing.assert_close(
+        positive["timestep"], torch.full((1, 8), 7, dtype=positive["timestep"].dtype)
+    )
     torch.testing.assert_close(positive["hidden_states"], latents)
     torch.testing.assert_close(result, torch.ones_like(latents))
 
@@ -96,4 +98,3 @@ def test_ti2v_prepare_i2v_latents_encodes_condition_and_masks_first_frame() -> N
     assert latent_condition.shape == (1, 4, 1, 2, 2)
     assert first_frame_mask[:, :, 0].sum() == 0
     assert first_frame_mask[:, :, 1].sum() == 4
-

@@ -98,8 +98,9 @@ def test_i2v_diffuse_selects_stage_guidance_and_expands_timesteps() -> None:
     assert [call["model"] for call in calls] == ["high", "low"]
     assert [call["scale"] for call in calls] == [1.0, 2.0]
     assert calls[0]["timestep_shape"] == (1, 8)
-    torch.testing.assert_close(calls[0]["timestep_values"][0, :4], torch.zeros(4))
-    torch.testing.assert_close(calls[0]["timestep_values"][0, 4:], torch.full((4,), 900))
+    timestep_dtype = calls[0]["timestep_values"].dtype
+    torch.testing.assert_close(calls[0]["timestep_values"][0, :4], torch.zeros(4, dtype=timestep_dtype))
+    torch.testing.assert_close(calls[0]["timestep_values"][0, 4:], torch.full((4,), 900, dtype=timestep_dtype))
     torch.testing.assert_close(calls[0]["hidden_states"][:, :, 0], torch.ones(1, 4, 4, 4))
     torch.testing.assert_close(result, torch.full_like(latents, 2.0))
 
@@ -123,4 +124,3 @@ def test_i2v_prepare_latents_builds_expand_condition_and_first_frame_mask() -> N
     assert first_frame_mask.shape == (1, 1, 2, 2, 2)
     assert first_frame_mask[:, :, 0].sum() == 0
     assert first_frame_mask[:, :, 1].sum() == 4
-

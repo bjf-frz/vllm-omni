@@ -48,6 +48,9 @@ def _make_pipeline() -> Wan22Pipeline:
     pipeline.transformer_2 = None
     pipeline.transformer_config = SimpleNamespace(patch_size=(1, 2, 2), in_channels=4, out_channels=4)
     pipeline.scheduler = _StubScheduler([9, 5])
+    pipeline.od_config = SimpleNamespace(flow_shift=5.0)
+    pipeline._sample_solver = "unipc"
+    pipeline._flow_shift = 5.0
     pipeline.vae_scale_factor_temporal = 4
     pipeline.vae_scale_factor_spatial = 8
     pipeline.boundary_ratio = 0.875
@@ -90,6 +93,7 @@ def test_forward_delegates_denoising_to_diffuse(monkeypatch) -> None:
             num_outputs_per_prompt=1,
             max_sequence_length=32,
             latents=None,
+            extra_args={},
         ),
     )
 
