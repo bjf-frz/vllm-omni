@@ -39,6 +39,24 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def create_diffusion_client(
+    model: str,
+    od_config: OmniDiffusionConfig,
+    metadata: StageMetadata,
+    stage_init_timeout: int,
+    batch_size: int = 1,
+    use_inline: bool = False,
+) -> Any:
+    """Factory to create either an inline or out-of-process diffusion client."""
+    if use_inline:
+        from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
+
+        return InlineStageDiffusionClient(model, od_config, metadata, batch_size=batch_size)
+    return StageDiffusionClient(
+        model, od_config, metadata, stage_init_timeout=stage_init_timeout, batch_size=batch_size
+    )
+
+
 class StageDiffusionClient:
     """Communicates with StageDiffusionProc via ZMQ for use inside the Orchestrator.
 
