@@ -78,4 +78,3 @@ def noop_progress_bar(*args, **kwargs):
             return None
 
     yield Bar()
-

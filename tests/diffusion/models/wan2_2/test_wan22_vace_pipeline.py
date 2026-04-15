@@ -135,4 +135,3 @@ def test_vace_diffuse_passes_context_and_scale_to_cfg_branches() -> None:
     assert calls[0]["positive_kwargs"]["vace_context"] is vace_context
     assert calls[0]["negative_kwargs"]["vace_context_scale"] == 0.75
     torch.testing.assert_close(result, torch.ones_like(latents))
-

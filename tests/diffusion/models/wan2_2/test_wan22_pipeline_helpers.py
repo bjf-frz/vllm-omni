@@ -79,4 +79,3 @@ def test_create_transformer_from_config_maps_supported_keys(monkeypatch) -> None
         "out_channels": 16,
         "text_dim": 4096,
     }
-

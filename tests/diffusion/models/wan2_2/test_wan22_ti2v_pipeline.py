@@ -72,9 +72,7 @@ def test_ti2v_diffuse_without_image_condition_expands_patch_timesteps() -> None:
     positive = calls[0]["positive_kwargs"]
     assert calls[0]["do_true_cfg"] is True
     assert positive["timestep"].shape == (1, 8)
-    torch.testing.assert_close(
-        positive["timestep"], torch.full((1, 8), 7, dtype=positive["timestep"].dtype)
-    )
+    torch.testing.assert_close(positive["timestep"], torch.full((1, 8), 7, dtype=positive["timestep"].dtype))
     torch.testing.assert_close(positive["hidden_states"], latents)
     torch.testing.assert_close(result, torch.ones_like(latents))
 
