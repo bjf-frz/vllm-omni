@@ -17,12 +17,17 @@ import torch
 from fastapi import Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from transformers.utils.hub import cached_file
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.launcher import terminate_if_errored
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorResponse,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.logger import init_logger
 from vllm.multimodal.media import MediaConnector
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 from vllm_omni.entrypoints.openai.audio_utils_mixin import AudioMixin
 from vllm_omni.entrypoints.openai.protocol.audio import (
@@ -1111,7 +1116,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             )
         return wav_np.tolist(), sr
 
-    async def _generate_audio_chunks(self, generator, request_id: str, response_format: str = "pcm"):
+    async def _generate_audio_chunks(
+        self,
+        generator,
+        request_id: str,
+        response_format: str = "pcm",
+        raw_request: Request | None = None,
+    ):
         """Generate audio chunks for streaming response.
 
         Handles two audio output modes from the engine:
@@ -1185,6 +1196,19 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     yield self.create_audio(audio_obj).audio_data
         except asyncio.CancelledError:
             logger.info("Streaming request %s cancelled by client", request_id)
+            raise
+        except EngineDeadError as e:
+            logger.error(
+                "EngineDeadError during streaming speech for %s: %s",
+                request_id,
+                e,
+            )
+            # Actively signal shutdown rather than relying on the watchdog.
+            if raw_request is not None:
+                terminate_if_errored(
+                    server=raw_request.app.state.server,
+                    engine=self.engine_client,
+                )
             raise
         except Exception as e:
             logger.exception("Streaming speech generation failed for %s: %s", request_id, e)
@@ -1765,6 +1789,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         except asyncio.CancelledError:
             return self._diffusion_error_response("Client disconnected")
+        except (EngineGenerateError, EngineDeadError):
+            raise  # Propagate to the global Omni exception handler
         except ValueError as e:
             return self._diffusion_error_response(str(e))
         except Exception as e:
@@ -1810,6 +1836,16 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
+        # Set request metadata early for exception handler observability.
+        # The actual engine request_id is generated deeper in
+        # _prepare_speech_generation, but this gives us a traceable ID
+        # for any errors that occur before or during generation.
+        speech_request_id = f"speech-{random_uuid()}"
+        if raw_request:
+            raw_request.state.request_metadata = RequestResponseMetadata(
+                request_id=speech_request_id,
+            )
+
         try:
             if request.stream:
                 # Determine response format and media type for streaming
@@ -1831,8 +1867,15 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
                 media_type = "audio/wav" if response_format == "wav" else "audio/pcm"
                 request_id, generator, _ = await self._prepare_speech_generation(request)
+                if raw_request:
+                    raw_request.state.request_metadata = RequestResponseMetadata(request_id=request_id)
                 return StreamingResponse(
-                    self._generate_audio_chunks(generator, request_id, response_format),
+                    self._generate_audio_chunks(
+                        generator,
+                        request_id,
+                        response_format,
+                        raw_request=raw_request,
+                    ),
                     media_type=media_type,
                 )
 
@@ -1841,6 +1884,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except (EngineGenerateError, EngineDeadError):
+            raise  # Propagate to the global Omni exception handler
         except ValueError as e:
             return self.create_error_response(e)
         except Exception as e:

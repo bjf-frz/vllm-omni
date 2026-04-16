@@ -721,7 +721,9 @@ class AsyncOmni(EngineClient, OmniBase):
     @property
     def is_running(self) -> bool:
         """Check if the engine is running."""
-        return self.final_output_task is not None and not self.final_output_task.done()
+        orchestrator_alive = self.engine.is_alive()
+        task_alive = self.final_output_task is not None and not self.final_output_task.done()
+        return orchestrator_alive and task_alive
 
     @property
     def errored(self) -> bool:
