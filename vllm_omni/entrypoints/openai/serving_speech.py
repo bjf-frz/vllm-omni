@@ -1484,6 +1484,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     async def _prepare_speech_generation(
         self,
         request: OpenAICreateSpeechRequest,
+        request_id: str | None = None,
     ) -> tuple[str, Any, dict[str, Any]]:
         if self.engine_client.errored:
             raise self.engine_client.dead_error
@@ -1582,7 +1583,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             tts_params = {}
             prompt = {"prompt": request.input}
 
-        request_id = f"speech-{random_uuid()}"
+        request_id = request_id or f"speech-{random_uuid()}"
         if self._is_fish_speech:
             model_type = "fish_speech"
         elif self._tts_model_type == "voxtral_tts":
@@ -1664,8 +1665,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         self,
         request: OpenAICreateSpeechRequest,
         base64_encode: bool = False,
+        request_id: str | None = None,
     ) -> tuple[bytes | str, str]:
-        request_id, generator, _ = await self._prepare_speech_generation(request)
+        request_id, generator, _ = await self._prepare_speech_generation(request, request_id=request_id)
 
         final_output: OmniRequestOutput | None = None
         async for res in generator:
@@ -1836,14 +1838,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        # Set request metadata early for exception handler observability.
-        # The actual engine request_id is generated deeper in
-        # _prepare_speech_generation, but this gives us a traceable ID
-        # for any errors that occur before or during generation.
-        speech_request_id = f"speech-{random_uuid()}"
+        request_id = f"speech-{random_uuid()}"
         if raw_request:
             raw_request.state.request_metadata = RequestResponseMetadata(
-                request_id=speech_request_id,
+                request_id=request_id,
             )
 
         try:
@@ -1866,9 +1864,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     )
 
                 media_type = "audio/wav" if response_format == "wav" else "audio/pcm"
-                request_id, generator, _ = await self._prepare_speech_generation(request)
-                if raw_request:
-                    raw_request.state.request_metadata = RequestResponseMetadata(request_id=request_id)
+                _, generator, _ = await self._prepare_speech_generation(request, request_id=request_id)
                 return StreamingResponse(
                     self._generate_audio_chunks(
                         generator,
@@ -1879,7 +1875,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     media_type=media_type,
                 )
 
-            audio_bytes, media_type = await self._generate_audio_bytes(request)
+            audio_bytes, media_type = await self._generate_audio_bytes(request, request_id=request_id)
             return Response(content=audio_bytes, media_type=media_type)
 
         except asyncio.CancelledError:
