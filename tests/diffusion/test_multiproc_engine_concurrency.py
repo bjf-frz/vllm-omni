@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import multiprocessing as mp
 import queue
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
@@ -16,6 +18,8 @@ from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
 from vllm_omni.diffusion.executor.multiproc_executor import MultiprocDiffusionExecutor
 from vllm_omni.diffusion.sched import RequestScheduler
+from vllm_omni.diffusion.stage_diffusion_proc import StageDiffusionProc
+from vllm_omni.outputs import OmniRequestOutput
 
 pytestmark = [pytest.mark.diffusion, pytest.mark.core_model, pytest.mark.cpu]
 
@@ -448,6 +452,7 @@ class TestMultiprocExecutorRaisesEngineDeadError:
         executor._closed = False
         executor._broadcast_mq = MagicMock()
         executor._result_mq = MagicMock()
+        executor._result_mq.dequeue = MagicMock(side_effect=TimeoutError)
         executor.is_failed = True
 
         with pytest.raises(EngineDeadError):
@@ -610,3 +615,177 @@ class TestStageDiffusionClientErrorPropagation:
         assert result is None
         assert client._shutting_down is True
         assert client._engine_dead is True
+
+
+# ───────── monitor thread & death sentinel integration tests ─────────
+
+
+def _poll_flag(get_flag, *, timeout=5.0, interval=0.05) -> bool:
+    """Poll until ``get_flag()`` returns True or *timeout* elapses."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if get_flag():
+            return True
+        time.sleep(interval)
+    return False
+
+
+def _make_short_lived_process() -> mp.Process:
+    """Spawn a real subprocess that exits immediately.
+
+    The process must be started with ``"fork"`` (or the platform default)
+    so that it can use a plain ``lambda`` as its target — ``"spawn"`` would
+    fail to pickle it.
+    """
+    ctx = mp.get_context("fork")
+    p = ctx.Process(target=lambda: None, name="ShortLivedWorker-0")
+    p.start()
+    return p
+
+
+class TestMultiprocExecutorWorkerMonitor:
+    """Integration tests for ``start_worker_monitor``.
+
+    Uses real short-lived subprocesses so that OS-level sentinel fd
+    readiness is exercised end-to-end.
+    """
+
+    def test_worker_monitor_sets_is_failed_and_calls_callbacks_on_death(self):
+        """When a worker process dies, the monitor thread must:
+        1. Set ``is_failed = True``
+        2. Call ``shutdown()`` (which sets ``_closed = True``)
+        3. Invoke all registered failure callbacks
+        """
+        executor = object.__new__(MultiprocDiffusionExecutor)
+        executor._closed = False
+        executor.is_failed = False
+        executor._failure_callbacks = []
+        executor._broadcast_mq = None
+        executor._result_mq = None
+        executor.resources = None
+        # Use a no-op so shutdown() doesn't crash on None resources.
+        executor._finalizer = lambda: None
+
+        proc = _make_short_lived_process()
+        executor._processes = [proc]
+
+        callback_called = threading.Event()
+        executor.register_failure_callback(callback_called.set)
+
+        executor.start_worker_monitor()
+
+        # Wait for the process to exit and the monitor to react.
+        proc.join(5)
+        assert _poll_flag(lambda: executor.is_failed), "is_failed was not set"
+        assert executor._closed, "shutdown() was not called"
+        assert callback_called.wait(timeout=2), "failure callback was not invoked"
+
+    def test_worker_monitor_noop_when_already_closed(self):
+        """If ``_closed`` is already True when the process dies (orderly
+        shutdown), the monitor must *not* set ``is_failed``."""
+        executor = object.__new__(MultiprocDiffusionExecutor)
+        executor._closed = True  # already shut down
+        executor.is_failed = False
+        executor._failure_callbacks = []
+        executor._broadcast_mq = None
+        executor._result_mq = None
+        executor.resources = None
+        executor._finalizer = lambda: None
+
+        proc = _make_short_lived_process()
+        executor._processes = [proc]
+
+        executor.start_worker_monitor()
+        proc.join(5)
+
+        # Give the monitor thread a chance to run (it should early-return).
+        time.sleep(0.3)
+        assert not executor.is_failed, "is_failed should remain False on orderly shutdown"
+
+
+class TestStageDiffusionClientProcMonitor:
+    """Integration test for ``StageDiffusionClient._start_proc_monitor``.
+
+    Uses a real short-lived subprocess to verify the sentinel-based
+    detection pipeline.
+    """
+
+    def test_proc_monitor_sets_engine_dead_on_process_death(self):
+        """When the subprocess dies, the monitor thread must set
+        ``_engine_dead = True``."""
+        from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
+
+        client = object.__new__(StageDiffusionClient)
+        client.stage_id = 0
+        client._shutting_down = False
+        client._engine_dead = False
+
+        proc = _make_short_lived_process()
+        client._proc = proc
+
+        client._start_proc_monitor()
+        proc.join(5)
+
+        assert _poll_flag(lambda: client._engine_dead), "_engine_dead was not set"
+
+
+class TestDrainResponsesDeathSentinel:
+    """Tests for death sentinel and error routing in
+    ``StageDiffusionClient._drain_responses()``.
+    """
+
+    def _make_client(self):
+        from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
+
+        client = object.__new__(StageDiffusionClient)
+        client.stage_id = 0
+        client._engine_dead = False
+        client._shutting_down = False
+        client._output_queue = asyncio.Queue()
+        client._rpc_results = {}
+        client._pending_rpcs = set()
+        client._response_socket = MagicMock()
+        client._decoder = MagicMock()
+        return client
+
+    def test_drain_responses_sets_engine_dead_on_death_sentinel(self):
+        """When ``_drain_responses`` receives the ``DIFFUSION_PROC_DEAD``
+        sentinel, it must set ``_engine_dead = True`` and stop draining
+        (decoder is never called)."""
+        client = self._make_client()
+
+        # First recv returns the death sentinel, second would be a normal
+        # message but should never be reached.
+        client._response_socket.recv.side_effect = [
+            StageDiffusionProc.DIFFUSION_PROC_DEAD,
+            b"should-not-be-reached",
+        ]
+
+        client._drain_responses()
+
+        assert client._engine_dead is True
+        client._decoder.decode.assert_not_called()
+
+    def test_drain_responses_routes_error_as_omni_request_output(self):
+        """When ``_drain_responses`` receives a ``{"type": "error"}`` message
+        with a ``request_id``, it must place an ``OmniRequestOutput`` with
+        the error on ``_output_queue``."""
+        client = self._make_client()
+
+        error_msg = {
+            "type": "error",
+            "request_id": "req-fail",
+            "error": "gpu fault",
+        }
+        # First recv returns the encoded error, second raises zmq.Again.
+        client._response_socket.recv.side_effect = [b"encoded-error", zmq.Again]
+        client._decoder.decode.return_value = error_msg
+
+        client._drain_responses()
+
+        assert not client._output_queue.empty()
+        output = client._output_queue.get_nowait()
+        assert isinstance(output, OmniRequestOutput)
+        assert output.request_id == "req-fail"
+        assert output.error == "gpu fault"
+        assert output.finished is True
