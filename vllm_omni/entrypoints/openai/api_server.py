@@ -928,7 +928,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     try:
         generator = await handler.create_chat_completion(request, raw_request)
     except (EngineGenerateError, EngineDeadError):
-        raise
+        raise  # Propagate to the global Omni exception handler
     except Exception as e:
         logger.exception("Chat completion failed: %s", e)
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
@@ -1025,7 +1025,7 @@ async def create_speech(request: OpenAICreateSpeechRequest, raw_request: Request
             )
         return result
     except (EngineGenerateError, EngineDeadError):
-        raise
+        raise  # Propagate to the global Omni exception handler
     except Exception as e:
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
 
@@ -1061,7 +1061,7 @@ async def create_speech_batch(request: BatchSpeechRequest, raw_request: Request)
             )
         return JSONResponse(content=result.model_dump())
     except (EngineGenerateError, EngineDeadError):
-        raise
+        raise  # Propagate to the global Omni exception handler
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value, detail=str(e)) from e
     except Exception as e:
@@ -1495,7 +1495,7 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
         )
 
     except (EngineGenerateError, EngineDeadError):
-        raise
+        raise  # Propagate to the global Omni exception handler
     except HTTPException:
         raise
     except ValueError as e:
@@ -1719,7 +1719,7 @@ async def edit_images(
         )
 
     except (EngineGenerateError, EngineDeadError):
-        raise
+        raise  # Propagate to the global Omni exception handler
     except HTTPException:
         raise
     except ValueError as e:
@@ -2384,7 +2384,7 @@ async def create_video_sync(
             detail=f"Video generation timed out after {VIDEO_SYNC_TIMEOUT_S}s.",
         )
     except (EngineGenerateError, EngineDeadError):
-        raise
+        raise  # Propagate to the global Omni exception handler
     except HTTPException:
         raise
     except Exception as exc:
