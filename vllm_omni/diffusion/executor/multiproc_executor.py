@@ -208,7 +208,7 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
             if self._closed:
                 return
 
-            dead = [p.name for p in self._processes if p.sentinel in finished and not p.is_alive()]
+            dead = [p.name for p in self._processes if p.sentinel in finished]
             if dead:
                 logger.error(
                     "Diffusion worker(s) died unexpectedly: %s",
