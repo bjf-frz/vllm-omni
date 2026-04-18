@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+import os
 from collections.abc import Iterable
 from typing import Any
 
@@ -32,6 +33,19 @@ from vllm_omni.diffusion.forward_context import get_forward_context
 from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
+
+_WAN_FUSED_ADALN_BACKENDS = {"auto", "native", "trt_llm", "trt_plugin"}
+
+
+def _get_wan_fused_backend(env_name: str, default: str = "native") -> str:
+    backend = os.getenv(env_name, default).strip().lower()
+    if backend not in _WAN_FUSED_ADALN_BACKENDS:
+        logger.warning_once(
+            f"Unsupported {env_name}={backend!r}; "
+            f"expected one of {sorted(_WAN_FUSED_ADALN_BACKENDS)}. Falling back to {default!r}."
+        )
+        return default
+    return backend
 
 
 def apply_rotary_emb_wan(
@@ -344,6 +358,100 @@ class OutputScaleShiftPrepare(nn.Module):
         return shift, scale
 
 
+class _WanAdaLayerNormNative(nn.Module):
+    def __init__(self, dim: int, eps: float):
+        super().__init__()
+        self.norm = FP32LayerNorm(dim, eps, elementwise_affine=False)
+
+    def forward(self, hidden_states: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+        return self.norm(hidden_states) * (1 + scale) + shift
+
+
+class WanFusedAdaLayerNorm(nn.Module):
+    """Backend-selectable AdaLayerNorm used by Wan fused-op experiments.
+
+    Backend selection is controlled by ``VLLM_OMNI_WAN_ADALN_BACKEND``:
+
+    - ``native``: PyTorch reference path.
+    - ``trt_llm``: reserved for TensorRT-LLM graph/runtime integration. This
+      cannot execute inside PyTorch eager forward, so it falls back today.
+    - ``trt_plugin``: calls a future registered torch custom op backed by a
+      TensorRT plugin, then falls back if the op is absent.
+    - ``auto``: try plugin first, then native.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6, backend: str | None = None):
+        super().__init__()
+        self.eps = eps
+        self.native = _WanAdaLayerNormNative(dim, eps)
+        self.backend = backend or _get_wan_fused_backend("VLLM_OMNI_WAN_ADALN_BACKEND")
+        if self.backend not in _WAN_FUSED_ADALN_BACKENDS:
+            raise ValueError(f"Unsupported Wan fused AdaLayerNorm backend: {self.backend!r}")
+        self._disable_trt_llm = False
+        self._disable_trt_plugin = False
+
+    def _forward_trt_plugin(
+        self,
+        hidden_states: torch.Tensor,
+        scale: torch.Tensor,
+        shift: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self._disable_trt_plugin:
+            return None
+        if not current_omni_platform.is_cuda():
+            return None
+        try:
+            op = torch.ops.vllm_omni.wan_adalayernorm
+        except (AttributeError, RuntimeError):
+            self._disable_trt_plugin = True
+            logger.warning_once(
+                "VLLM_OMNI_WAN_ADALN_BACKEND requested TensorRT plugin, "
+                "but torch.ops.vllm_omni.wan_adalayernorm is not registered. Falling back to native."
+            )
+            return None
+
+        try:
+            return op(hidden_states, scale, shift, self.eps)
+        except Exception as exc:
+            self._disable_trt_plugin = True
+            logger.warning_once(f"TensorRT plugin AdaLayerNorm failed; falling back to native: {exc}")
+            return None
+
+    def _forward_trt_llm(
+        self,
+        hidden_states: torch.Tensor,
+        scale: torch.Tensor,
+        shift: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self._disable_trt_llm:
+            return None
+
+        self._disable_trt_llm = True
+        logger.warning_once(
+            "VLLM_OMNI_WAN_ADALN_BACKEND=trt_llm is reserved for TensorRT-LLM graph/runtime integration. "
+            "Wan2.2 is currently executing in PyTorch eager mode, so AdaLayerNorm falls back to native."
+        )
+        return None
+
+    def forward(self, hidden_states: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states.float()
+
+        if self.backend == "trt_llm":
+            output = self._forward_trt_llm(hidden_states, scale, shift)
+            if output is not None:
+                return output
+        elif self.backend == "trt_plugin":
+            output = self._forward_trt_plugin(hidden_states, scale, shift)
+            if output is not None:
+                return output
+        elif self.backend == "auto":
+            output = self._forward_trt_plugin(hidden_states, scale, shift)
+            if output is not None:
+                return output
+
+        return self.native(hidden_states, scale, shift)
+
+
 class WanSelfAttention(nn.Module):
     """
     Optimized self-attention module using vLLM layers.
@@ -620,7 +728,7 @@ class WanTransformerBlock(nn.Module):
         head_dim = dim // num_heads
 
         # 1. Self-attention
-        self.norm1 = FP32LayerNorm(dim, eps, elementwise_affine=False)
+        self.norm1 = WanFusedAdaLayerNorm(dim, eps)
         self.attn1 = WanSelfAttention(
             dim=dim,
             num_heads=num_heads,
@@ -640,7 +748,7 @@ class WanTransformerBlock(nn.Module):
 
         # 3. Feed-forward
         self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim)
-        self.norm3 = FP32LayerNorm(dim, eps, elementwise_affine=False)
+        self.norm3 = WanFusedAdaLayerNorm(dim, eps)
 
         # Scale-shift table for modulation
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
@@ -671,7 +779,7 @@ class WanTransformerBlock(nn.Module):
             ).chunk(6, dim=1)
 
         # 1. Self-attention
-        norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
+        norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa).type_as(hidden_states)
         attn_output = self.attn1(norm_hidden_states, rotary_emb, hidden_states_mask)
         hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(hidden_states)
 
@@ -681,9 +789,7 @@ class WanTransformerBlock(nn.Module):
         hidden_states = hidden_states + attn_output
 
         # 3. Feed-forward
-        norm_hidden_states = (self.norm3(hidden_states.float()) * (1 + c_scale_msa) + c_shift_msa).type_as(
-            hidden_states
-        )
+        norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa).type_as(hidden_states)
         ff_output = self.ffn(norm_hidden_states)
         hidden_states = (hidden_states.float() + ff_output.float() * c_gate_msa).type_as(hidden_states)
 
@@ -854,7 +960,7 @@ class WanTransformer3DModel(nn.Module):
         )
 
         # 4. Output norm & projection
-        self.norm_out = FP32LayerNorm(inner_dim, eps, elementwise_affine=False)
+        self.norm_out = WanFusedAdaLayerNorm(inner_dim, eps)
         self.proj_out = nn.Linear(inner_dim, out_channels * math.prod(patch_size))
 
         # SP helper modules
@@ -942,7 +1048,7 @@ class WanTransformer3DModel(nn.Module):
             shift = shift.unsqueeze(1)
             scale = scale.unsqueeze(1)
 
-        hidden_states = (self.norm_out(hidden_states.float()) * (1 + scale) + shift).type_as(hidden_states)
+        hidden_states = self.norm_out(hidden_states, scale, shift).type_as(hidden_states)
         hidden_states = self.proj_out(hidden_states)
 
         hidden_states = hidden_states.reshape(
