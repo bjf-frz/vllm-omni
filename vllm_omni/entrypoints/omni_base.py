@@ -298,7 +298,7 @@ class OmniBase(PDDisaggregationMixin):
         # NOTE: O(n_stages) check for every error.
         if self.errored:
             raise EngineDeadError(error_text)
-        raise EngineGenerateError() from RuntimeError(error_text)
+        raise EngineGenerateError(error_text) from RuntimeError(error_text)
 
     def _process_single_result(
         self,

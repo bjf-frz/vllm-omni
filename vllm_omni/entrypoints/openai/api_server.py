@@ -2126,6 +2126,48 @@ def video_response_from_request(model_name: str, req: VideoGenerationRequest) ->
     return resp
 
 
+def _status_code_for_video_failure(error: VideoError | None) -> int:
+    if error is None:
+        return HTTPStatus.INTERNAL_SERVER_ERROR.value
+
+    if isinstance(error.code, int):
+        if 400 <= error.code < 600:
+            return error.code
+        return HTTPStatus.INTERNAL_SERVER_ERROR.value
+
+    if error.code == "HTTPException":
+        status_text, _, _ = error.message.partition(":")
+        try:
+            status_code = int(status_text)
+        except ValueError:
+            return HTTPStatus.INTERNAL_SERVER_ERROR.value
+        if 400 <= status_code < 600:
+            return status_code
+        return HTTPStatus.INTERNAL_SERVER_ERROR.value
+
+    if error.code == "EngineDeadError":
+        return HTTPStatus.INTERNAL_SERVER_ERROR.value
+    if error.code == "EngineGenerateError":
+        return HTTPStatus.INTERNAL_SERVER_ERROR.value
+
+    return HTTPStatus.INTERNAL_SERVER_ERROR.value
+
+
+def _video_error_from_exception(exc: Exception) -> VideoError:
+    if isinstance(exc, HTTPException):
+        message = str(exc.detail) if exc.detail else str(exc)
+        return VideoError(code=exc.status_code, message=message)
+
+    if isinstance(exc, (EngineGenerateError, EngineDeadError)):
+        err = create_error_response(exc)
+        return VideoError(code=err.error.code, message=err.error.message)
+
+    return VideoError(
+        code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        message=str(exc),
+    )
+
+
 def _cleanup_video(video_id: str, output_path: str | None):
     try:
         if output_path is not None:
@@ -2179,7 +2221,7 @@ async def _run_video_generation_job(
             {
                 "status": VideoGenerationStatus.FAILED,
                 "completed_at": int(time.time()),
-                "error": VideoError(code=type(exc).__name__, message=str(exc)),
+                "error": _video_error_from_exception(exc),
                 "inference_time_s": time.perf_counter() - started_at,
             },
         )
@@ -2194,13 +2236,12 @@ async def _run_video_generation_job(
         logger.exception("Video generation failed for id=%s", video_id)
 
         _cleanup_video(video_id, output_path)
-        # TODO: It would be better to have a finite collection of errors to return rather than the exception name
         await VIDEO_STORE.update_fields(
             video_id,
             {
                 "status": VideoGenerationStatus.FAILED,
                 "completed_at": int(time.time()),
-                "error": VideoError(code=type(exc).__name__, message=str(exc)),
+                "error": _video_error_from_exception(exc),
                 "inference_time_s": time.perf_counter() - started_at,
             },
         )
@@ -2445,8 +2486,8 @@ async def list_videos(
     return VideoListResponse(data=jobs, has_more=has_more, first_id=first_id, last_id=last_id)
 
 
-@router.get("/v1/videos/{video_id}")
-async def retrieve_video(video_id: str) -> VideoResponse:
+@router.get("/v1/videos/{video_id}", response_model=None)
+async def retrieve_video(video_id: str) -> VideoResponse | JSONResponse:
     """Retrieve metadata for a previously created video job.
 
     Args:
@@ -2461,6 +2502,15 @@ async def retrieve_video(video_id: str) -> VideoResponse:
     job = await VIDEO_STORE.get(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
+    if job.status == VideoGenerationStatus.FAILED:
+        status_code = _status_code_for_video_failure(job.error)
+        content = job.model_dump(mode="json")
+        if content.get("error") is not None:
+            content["error"]["code"] = status_code
+        return JSONResponse(
+            content=content,
+            status_code=status_code,
+        )
     return job
 
 
