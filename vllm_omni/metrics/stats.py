@@ -43,6 +43,7 @@ class StageRequestStats:
     postprocess_time_ms: float = 0.0
     diffusion_metrics: dict[str, int] = None
     audio_generated_frames: int = 0
+    ar2diffusion_time_ms: float = 0.0
 
     @property
     def rx_mbps(self) -> float:
@@ -78,7 +79,6 @@ class RequestE2EStats:
     request_id: str
     request_wall_time_ms: float
     input_preprocess_time_ms: float
-    build_add_request_message_time_ms: float
     engine_pipeline_time_ms: float
     e2e_total_tokens: int
     transfers_total_time_ms: float
@@ -142,7 +142,6 @@ class OrchestratorAggregator:
         self.stage_total_tokens = [0 for _ in range(self.num_stages)]
         self.engine_pipeline_total_ms = 0.0
         self.input_preprocess_total_ms = 0.0
-        self.build_add_request_message_total_ms = 0.0
         self.e2e_total_tokens = 0
         self.e2e_count = 0
         self.e2e_done = set()
@@ -189,6 +188,7 @@ class OrchestratorAggregator:
     def _log_omni_timing(self, evt: RequestE2EStats) -> None:
         rid = evt.request_id
         stages = []
+        ar2diffusion_ms = 0.0
         for stage_evt in sorted(
             self.stage_events.get(rid, []),
             key=lambda e: e.stage_id if e.stage_id is not None else -1,
@@ -196,6 +196,7 @@ class OrchestratorAggregator:
             stages.append(
                 f"{self._stage_label(stage_evt.stage_id)}={self._format_seconds(stage_evt.stage_gen_time_ms)}"
             )
+            ar2diffusion_ms += float(stage_evt.ar2diffusion_time_ms or 0.0)
         transfers = []
         for transfer_evt in sorted(
             [e for e in self.transfer_events.values() if e.request_id == rid],
@@ -203,12 +204,14 @@ class OrchestratorAggregator:
         ):
             transfers.append(f"{transfer_evt.from_stage}->{transfer_evt.to_stage}={transfer_evt.total_time_ms:.3f}ms")
 
+        ar2diffusion = f" ar2diffusion={self._format_seconds(ar2diffusion_ms)}" if ar2diffusion_ms > 0.0 else ""
         logger.info(
-            "[OmniTiming] req=%s total=%s preprocess=%s engine=%s stages=[%s] transfers=[%s]",
+            "[OmniTiming] req=%s total=%s preprocess=%s engine=%s%s stages=[%s] transfers=[%s]",
             rid,
             self._format_seconds(evt.request_wall_time_ms),
             self._format_seconds(evt.input_preprocess_time_ms),
             self._format_seconds(evt.engine_pipeline_time_ms),
+            ar2diffusion,
             ",".join(stages),
             ",".join(transfers),
         )
@@ -418,18 +421,26 @@ class OrchestratorAggregator:
 
         self.record_transfer_rx(stats)
 
-    def record_stage_postprocess_time(self, stage_id: int, req_id: Any, postproc_time_ms: float) -> None:
-        if req_id in self.stage_events:
-            for stats in self.stage_events[req_id]:
+    def _update_stage_event_field(self, stage_id: int, req_id: Any, field_name: str, value: float) -> None:
+        rid_key = str(req_id)
+        if rid_key in self.stage_events:
+            for stats in self.stage_events[rid_key]:
                 if stats.stage_id == stage_id:
-                    stats.postprocess_time_ms = float(postproc_time_ms)
+                    setattr(stats, field_name, float(value))
                     break
         else:
             logger.warning(
-                "Failed to record postprocess time for request %s at stage %s: no stage event found",
+                "Failed to record %s for request %s at stage %s: no stage event found",
+                field_name,
                 req_id,
                 stage_id,
             )
+
+    def record_stage_postprocess_time(self, stage_id: int, req_id: Any, postproc_time_ms: float) -> None:
+        self._update_stage_event_field(stage_id, req_id, "postprocess_time_ms", postproc_time_ms)
+
+    def record_ar2diffusion_time(self, stage_id: int, req_id: Any, ar2diffusion_time_ms: float) -> None:
+        self._update_stage_event_field(stage_id, req_id, "ar2diffusion_time_ms", ar2diffusion_time_ms)
 
     @contextmanager
     def stage_postprocess_timer(self, stage_id: int, req_id: Any):
@@ -492,7 +503,6 @@ class OrchestratorAggregator:
         req_id: Any,
         req_start_ts: float,
         input_preprocess_time_ms: float = 0.0,
-        build_add_request_message_time_ms: float = 0.0,
     ) -> None:
         rid_key = str(req_id)
         if rid_key in self.e2e_done:
@@ -505,7 +515,6 @@ class OrchestratorAggregator:
         self.last_finish_ts = max(self.last_finish_ts, _t1)
         engine_pipeline_ms = (_t1 - _t0) * 1000.0
         input_preprocess_ms = float(input_preprocess_time_ms)
-        build_msg_ms = float(build_add_request_message_time_ms)
         request_wall_ms = engine_pipeline_ms + input_preprocess_ms
 
         # Sum tokens from all stages for this request
@@ -519,7 +528,6 @@ class OrchestratorAggregator:
 
         self.engine_pipeline_total_ms += engine_pipeline_ms
         self.input_preprocess_total_ms += input_preprocess_ms
-        self.build_add_request_message_total_ms += build_msg_ms
         self.e2e_total_tokens += total_tokens
         self.e2e_count += 1
         self.e2e_done.add(rid_key)
@@ -527,7 +535,6 @@ class OrchestratorAggregator:
             request_id=rid_key,
             request_wall_time_ms=request_wall_ms,
             input_preprocess_time_ms=input_preprocess_ms,
-            build_add_request_message_time_ms=build_msg_ms,
             engine_pipeline_time_ms=engine_pipeline_ms,
             e2e_total_tokens=total_tokens,
             transfers_total_time_ms=float(
@@ -565,7 +572,6 @@ class OrchestratorAggregator:
             "e2e_requests": int(self.e2e_count),
             "request_wall_time_ms": float(wall_time_ms),
             "input_preprocess_time_ms": float(self.input_preprocess_total_ms),
-            "build_add_request_message_time_ms": float(self.build_add_request_message_total_ms),
             "engine_pipeline_time_ms": float(self.engine_pipeline_total_ms),
             "e2e_total_tokens": int(self.e2e_total_tokens),
             "avg_request_wall_time_ms": float(e2e_avg_req),
@@ -606,23 +612,6 @@ class OrchestratorAggregator:
             if e2e_evt:
                 e2e_data = _build_row(e2e_evt, E2E_FIELDS)
                 result_e2e_table.append({"request_id": rid, **e2e_data})
-
-                # filter out all-zero fields for logging
-                nonzero_e2e_fields = set()
-                for k, v in e2e_data.items():
-                    if v not in (0, 0.000, None, ""):
-                        nonzero_e2e_fields.add(k)
-                value_fields_e2e = sorted(nonzero_e2e_fields)
-
-                if value_fields_e2e:
-                    logger.info(
-                        "\n%s",
-                        _format_table(
-                            f"RequestE2EStats [request_id={rid}]",
-                            e2e_data,
-                            value_fields=value_fields_e2e,
-                        ),
-                    )
 
             # === Stage table (columns = stage_id) ===
             stage_evts = sorted(

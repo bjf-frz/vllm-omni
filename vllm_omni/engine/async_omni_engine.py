@@ -1485,7 +1485,7 @@ class AsyncOmniEngine:
         reasoning_ended: bool | None = None,
         *,
         resumable: bool = False,
-    ) -> dict[str, float]:
+    ) -> None:
         """Process stage-0 input locally, then send to the Orchestrator.
 
         Input processing and output
@@ -1493,7 +1493,6 @@ class AsyncOmniEngine:
         a queue + coroutine-switch round-trip.  The Orchestrator receives a
         ready-to-submit OmniEngineCoreRequest.
         """
-        build_msg_t0 = time.perf_counter()
         msg = self._build_add_request_message(
             request_id=request_id,
             prompt=prompt,
@@ -1509,7 +1508,6 @@ class AsyncOmniEngine:
             reasoning_ended=reasoning_ended,
             resumable=resumable,
         )
-        build_msg_ms = (time.perf_counter() - build_msg_t0) * 1000.0
         if self.request_queue is None:
             raise RuntimeError("request_queue is not initialized")
         self.request_queue.sync_q.put_nowait(msg)
@@ -1522,10 +1520,6 @@ class AsyncOmniEngine:
             stage0_params = effective_spl[0] if effective_spl else None
             if stage0_params is not None:
                 self._enqueue_cfg_companions(request_id, original_prompt, stage0_params, effective_spl)
-        return {
-            "input_preprocess_time_ms": build_msg_ms,
-            "build_add_request_message_time_ms": build_msg_ms,
-        }
 
     async def add_request_async(
         self,
@@ -1543,9 +1537,9 @@ class AsyncOmniEngine:
         reasoning_ended: bool | None = None,
         *,
         resumable: bool = False,
-    ) -> dict[str, float]:
+    ) -> None:
         """Async add_request API."""
-        return self.add_request(
+        self.add_request(
             request_id=request_id,
             prompt=prompt,
             prompt_text=prompt_text,

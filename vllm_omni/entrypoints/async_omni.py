@@ -285,7 +285,6 @@ class AsyncOmni(EngineClient, OmniBase):
             request_prep_start_ts = wall_start_ts
             req_start_ts: dict[str, float] = {}
             input_preprocess_time_ms: dict[str, float] = {}
-            build_add_request_message_time_ms: dict[str, float] = {}
 
             # Determine the final stage for E2E stats
             final_stage_id_for_e2e = self._compute_final_stage_id(output_modalities)
@@ -317,22 +316,15 @@ class AsyncOmni(EngineClient, OmniBase):
                     sampling_params_list=req_sp_list,
                     final_stage_id=final_stage_id_for_e2e,
                 )
-                add_request_timings = {}
             else:
-                add_request_timings = await self.engine.add_request_async(
+                await self.engine.add_request_async(
                     request_id=request_id,
                     prompt=prompt,
                     sampling_params_list=req_sp_list,
                     final_stage_id=final_stage_id_for_e2e,
-                ) or {}
+                )
             submit_ts = time.time()
             input_preprocess_time_ms[request_id] = (submit_ts - request_prep_start_ts) * 1000.0
-            build_add_request_message_time_ms[request_id] = float(
-                add_request_timings.get(
-                    "build_add_request_message_time_ms",
-                    input_preprocess_time_ms[request_id],
-                )
-            )
             req_state.metrics.stage_first_ts[0] = submit_ts
             req_start_ts[request_id] = submit_ts
 
@@ -346,7 +338,6 @@ class AsyncOmni(EngineClient, OmniBase):
                 final_stage_id_for_e2e,
                 req_start_ts,
                 input_preprocess_time_ms,
-                build_add_request_message_time_ms,
                 wall_start_ts,
             ):
                 yield output
@@ -494,7 +485,6 @@ class AsyncOmni(EngineClient, OmniBase):
         final_stage_id_for_e2e: int,
         req_start_ts: dict[str, float],
         input_preprocess_time_ms: dict[str, float],
-        build_add_request_message_time_ms: dict[str, float],
         wall_start_ts: float,
     ) -> AsyncGenerator[OmniRequestOutput, None]:
         """Read results from the Orchestrator (via the request's asyncio.Queue)
@@ -537,7 +527,6 @@ class AsyncOmni(EngineClient, OmniBase):
                 metrics,
                 req_start_ts,
                 input_preprocess_time_ms,
-                build_add_request_message_time_ms,
                 wall_start_ts,
                 final_stage_id_for_e2e,
             )

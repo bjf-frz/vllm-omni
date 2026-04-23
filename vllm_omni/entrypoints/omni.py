@@ -115,7 +115,6 @@ class Omni(OmniBase):
             request_ids = [f"{i}_{uuid.uuid4()}" for i in range(len(request_prompts))]
             req_start_ts: dict[str, float] = {}
             input_preprocess_time_ms: dict[str, float] = {}
-            build_add_request_message_time_ms: dict[str, float] = {}
             wall_start_ts = time.time()
             req_final_stage_ids: dict[str, int] = {}
 
@@ -143,17 +142,14 @@ class Omni(OmniBase):
                     p_id = pd_pair[0]
                     req_sp_list[p_id] = self._prepare_prefill_sampling_params(req_id, req_sp_list[p_id])
 
-                add_request_timings = self.engine.add_request(
+                self.engine.add_request(
                     request_id=req_id,
                     prompt=prompt,
                     sampling_params_list=req_sp_list,
                     final_stage_id=final_stage_id,
-                ) or {}
+                )
                 submit_ts = time.time()
                 input_preprocess_time_ms[req_id] = (submit_ts - request_prep_start_ts) * 1000.0
-                build_add_request_message_time_ms[req_id] = float(
-                    add_request_timings.get("build_add_request_message_time_ms", input_preprocess_time_ms[req_id])
-                )
                 req_state.metrics.stage_first_ts[0] = submit_ts
                 req_start_ts[req_id] = submit_ts
 
@@ -184,7 +180,6 @@ class Omni(OmniBase):
                     metrics=req_state.metrics,
                     req_start_ts=req_start_ts,
                     input_preprocess_time_ms=input_preprocess_time_ms,
-                    build_add_request_message_time_ms=build_add_request_message_time_ms,
                     wall_start_ts=wall_start_ts,
                     final_stage_id_for_e2e=req_final_stage_ids[req_id],
                 )

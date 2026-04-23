@@ -39,6 +39,7 @@ def test_orchestrator_aggregator_builds_summary() -> None:
             stage_stats=StageStats(),
         ),
     )
+    agg.record_ar2diffusion_time(0, "r1", 12.5)
     agg.on_stage_metrics(
         1,
         "r1",
@@ -65,6 +66,7 @@ def test_orchestrator_aggregator_builds_summary() -> None:
     stage_entry = _get_request_entry(summary["stage_table"], "r1")
     stage_ids = [row["stage_id"] for row in stage_entry["stages"]]
     assert stage_ids == [0, 1]
+    assert stage_entry["stages"][0]["ar2diffusion_time_ms"] == 12.5
 
     transfer_entry = _get_request_entry(summary["trans_table"], "r1")
     assert transfer_entry["transfers"][0]["edge"] == "0->1"
@@ -81,7 +83,6 @@ def test_build_and_log_summary_e2e_only() -> None:
             request_id="r",
             request_wall_time_ms=10.0,
             input_preprocess_time_ms=0.0,
-            build_add_request_message_time_ms=0.0,
             engine_pipeline_time_ms=10.0,
             e2e_total_tokens=5,
             transfers_total_time_ms=0.0,

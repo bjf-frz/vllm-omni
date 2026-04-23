@@ -110,7 +110,6 @@ For **online inference** (serving mode), the summary is always per-request. `e2e
 | `e2e_requests`            | Number of completed requests.                                                                |
 | `request_wall_time_ms`        | Wall-clock time span from request preparation start to final completion, in ms.          |
 | `input_preprocess_time_ms` | Time spent preparing and submitting requests before the engine pipeline starts.             |
-| `build_add_request_message_time_ms` | Time spent inside `AsyncOmniEngine._build_add_request_message()`.                  |
 | `engine_pipeline_time_ms` | Time from engine request submission to final completion.                                     |
 | `e2e_total_tokens`        | Total tokens counted across all completed requests (stage0 input + all stage outputs).       |
 | `avg_request_wall_time_ms` | Average wall time per request: `request_wall_time_ms / e2e_requests`.                     |
@@ -127,7 +126,6 @@ For **online inference** (serving mode), the summary is always per-request. `e2e
 |---------------------------|-----------------------------------------------------------------------|
 | `request_wall_time_ms`    | End-to-end latency in ms, including input preprocessing and engine pipeline time.            |
 | `input_preprocess_time_ms` | Time spent preparing and submitting the request before `engine_pipeline_time_ms` starts.    |
-| `build_add_request_message_time_ms` | Time spent inside `_build_add_request_message()` for this request.                 |
 | `engine_pipeline_time_ms` | Time from engine request submission to final completion.                                     |
 | `e2e_total_tokens`        | Total tokens for the request (stage0 input + all stage outputs).      |
 | `transfers_total_time_ms` | Sum of transfer edge `total_time_ms` for this request.                |
@@ -148,6 +146,7 @@ For **online inference** (serving mode), the summary is always per-request. `e2e
 | `image_num`               | Number of images generated (for diffusion/image stages).                                        |
 | `resolution`              | Image resolution (for diffusion/image stages).                                                                  |
 | `postprocess_time_ms` | Diffusion/image: post-processing time in ms.                                                    |
+| `ar2diffusion_time_ms` | Time spent converting AR-stage output into the diffusion-stage prompt before diffusion request submission. |
 
 ---
 

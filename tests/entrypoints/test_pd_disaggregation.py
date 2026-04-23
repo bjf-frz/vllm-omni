@@ -258,20 +258,12 @@ def _setup_log_mocks(monkeypatch):
             self.e2e_count = 0
             self.engine_pipeline_total_ms = 0.0
             self.input_preprocess_total_ms = 0.0
-            self.build_add_request_message_total_ms = 0.0
 
         def on_stage_metrics(self, stage_id, req_id, metrics, final_output_type=None):
             pass
 
-        def on_finalize_request(
-            self,
-            stage_id,
-            req_id,
-            start_ts,
-            input_preprocess_time_ms=0.0,
-            build_add_request_message_time_ms=0.0,
-        ):
-            del start_ts, input_preprocess_time_ms, build_add_request_message_time_ms
+        def on_finalize_request(self, stage_id, req_id, start_ts, input_preprocess_time_ms=0.0):
+            del start_ts, input_preprocess_time_ms
             self.e2e_done.add(req_id)
 
         def on_forward(self, from_stage, to_stage, req_id, size_bytes, tx_ms, use_shm):

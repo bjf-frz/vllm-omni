@@ -80,7 +80,7 @@ class CfgCompanionTracker:
             return parent_id
         return None
 
-    def defer_parent(self, parent_id: str, engine_outputs: Any, stage_id: int) -> None:
+    def defer_parent(self, parent_id: str, engine_outputs: Any, stage_id: int, stage_metrics: Any | None = None) -> None:
         """Hold parent result while waiting for companions to finish."""
         # TODO: Add timeout/error recovery when the orchestrator grows a
         # companion-failure path. Today deferred parents are released only when
@@ -88,6 +88,7 @@ class CfgCompanionTracker:
         self._pending_parents[parent_id] = {
             "engine_outputs": engine_outputs,
             "stage_id": stage_id,
+            "stage_metrics": stage_metrics,
         }
         logger.debug("Parent %s deferred, waiting for CFG companions", parent_id)
 

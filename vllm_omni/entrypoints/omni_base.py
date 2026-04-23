@@ -373,7 +373,6 @@ class OmniBase(PDDisaggregationMixin):
         metrics: OrchestratorMetrics,
         req_start_ts: dict[str, float],
         input_preprocess_time_ms: dict[str, float],
-        build_add_request_message_time_ms: dict[str, float],
         wall_start_ts: float,
         final_stage_id_for_e2e: int,
     ) -> OmniRequestOutput | None:
@@ -405,7 +404,6 @@ class OmniBase(PDDisaggregationMixin):
                     req_id,
                     req_start_ts.get(req_id, wall_start_ts),
                     input_preprocess_time_ms=input_preprocess_time_ms.get(req_id, 0.0),
-                    build_add_request_message_time_ms=build_add_request_message_time_ms.get(req_id, 0.0),
                 )
         except Exception:
             logger.exception("[%s] Finalize request handling error", self.__class__.__name__)

@@ -425,17 +425,6 @@ class Orchestrator:
                     "stage_submit_ts": submit_ts,
                 }
             )
-        elif stage_metrics is not None:
-            await self.output_async_queue.put(
-                {
-                    "type": "stage_metrics",
-                    "request_id": req_id,
-                    "stage_id": stage_id,
-                    "metrics": stage_metrics,
-                    "stage_submit_ts": submit_ts,
-                }
-            )
-
         # PD disaggregation: extract KV transfer params from prefill stage output
         if self._pd_pair is not None and finished and stage_id == self._pd_pair[0]:
             kv_params = getattr(output, "kv_transfer_params", None)
@@ -464,13 +453,14 @@ class Orchestrator:
                 and self._cfg_tracker.has_companions(req_id)
                 and not self._cfg_tracker.all_companions_done(req_id)
             ):
-                self._cfg_tracker.defer_parent(req_id, output, stage_id)
+                self._cfg_tracker.defer_parent(req_id, output, stage_id, stage_metrics)
             else:
                 await self._forward_to_next_stage(
                     req_id,
                     stage_id,
                     output,
                     req_state,
+                    stage_metrics=stage_metrics,
                     is_streaming_session=req_state.streaming.enabled,
                     is_final_update=False,
                 )
@@ -481,9 +471,21 @@ class Orchestrator:
                         stage_id,
                         output,
                         req_state,
+                        stage_metrics=stage_metrics,
                         is_streaming_session=True,
                         is_final_update=True,
                     )
+
+        if not stage_client.final_output and stage_metrics is not None:
+            await self.output_async_queue.put(
+                {
+                    "type": "stage_metrics",
+                    "request_id": req_id,
+                    "stage_id": stage_id,
+                    "metrics": stage_metrics,
+                    "stage_submit_ts": submit_ts,
+                }
+            )
 
         if finished and stage_id == req_state.final_stage_id:
             # PD: clean up any lingering KV params for this request
@@ -509,6 +511,7 @@ class Orchestrator:
                 deferred["stage_id"],
                 deferred["engine_outputs"],
                 parent_state,
+                stage_metrics=deferred.get("stage_metrics"),
             )
 
     async def _handle_kv_ready_raw_outputs(self, stage_id: int, raw_outputs: EngineCoreOutputs) -> None:
@@ -657,6 +660,7 @@ class Orchestrator:
         stage_id: int,
         output: Any,
         req_state: OrchestratorRequestState,
+        stage_metrics: Any | None = None,
         *,
         is_streaming_session: bool = False,
         is_final_update: bool = False,
@@ -682,13 +686,8 @@ class Orchestrator:
                     False,
                 )
                 _dt_ar2d = (_time.perf_counter() - _t_ar2d) * 1000
-                logger.info(
-                    "[Orchestrator] ar2diffusion req=%s wall_time=%.3fms stage=%d->%d",
-                    req_id,
-                    _dt_ar2d,
-                    stage_id,
-                    next_stage_id,
-                )
+                if stage_metrics is not None:
+                    stage_metrics.ar2diffusion_time_ms = _dt_ar2d
                 if isinstance(diffusion_prompt, list):
                     if not diffusion_prompt:
                         error_output = OmniRequestOutput.from_error(
