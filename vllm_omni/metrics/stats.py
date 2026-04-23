@@ -74,14 +74,15 @@ class TransferEdgeStats:
 @dataclass
 class RequestE2EStats:
     request_id: str
-    e2e_total_ms: float
+    request_latency_ms: float
+    request_submit_prep_ms: float
     e2e_total_tokens: int
     transfers_total_time_ms: float
     transfers_total_bytes: int
 
     @property
     def e2e_tpt(self) -> float:
-        return (self.e2e_total_ms / self.e2e_total_tokens) if self.e2e_total_tokens > 0 else 0.0
+        return (self.request_latency_ms / self.e2e_total_tokens) if self.e2e_total_tokens > 0 else 0.0
 
 
 # === Field Configuration ===
@@ -133,7 +134,8 @@ class OrchestratorAggregator:
     def init_run_state(self, wall_start_ts: float) -> None:
         # Per-run aggregates and timing state
         self.stage_total_tokens = [0 for _ in range(self.num_stages)]
-        self.e2e_total_ms = 0.0
+        self.request_latency_total_ms = 0.0
+        self.request_submit_prep_total_ms = 0.0
         self.e2e_total_tokens = 0
         self.e2e_count = 0
         self.e2e_done = set()
@@ -423,6 +425,7 @@ class OrchestratorAggregator:
         stage_id: int,
         req_id: Any,
         req_start_ts: float,
+        request_submit_prep_ms: float = 0.0,
     ) -> None:
         rid_key = str(req_id)
         if rid_key in self.e2e_done:
@@ -444,13 +447,15 @@ class OrchestratorAggregator:
                     total_tokens += int(evt.num_tokens_in)
                 total_tokens += int(evt.num_tokens_out)
 
-        self.e2e_total_ms += e2e_ms
+        self.request_latency_total_ms += e2e_ms
+        self.request_submit_prep_total_ms += float(request_submit_prep_ms)
         self.e2e_total_tokens += total_tokens
         self.e2e_count += 1
         self.e2e_done.add(rid_key)
         per_req_record = RequestE2EStats(
             request_id=rid_key,
-            e2e_total_ms=e2e_ms,
+            request_latency_ms=e2e_ms,
+            request_submit_prep_ms=float(request_submit_prep_ms),
             e2e_total_tokens=total_tokens,
             transfers_total_time_ms=float(
                 sum(evt.total_time_ms for evt in self.transfer_events.values() if evt.request_id == rid_key)
@@ -482,9 +487,14 @@ class OrchestratorAggregator:
 
         overall_summary = {
             "e2e_requests": int(self.e2e_count),
-            "e2e_wall_time_ms": float(wall_time_ms),
+            "run_wall_time_ms": float(wall_time_ms),
+            "request_latency_total_ms": float(self.request_latency_total_ms),
+            "request_submit_prep_total_ms": float(self.request_submit_prep_total_ms),
             "e2e_total_tokens": int(self.e2e_total_tokens),
-            "e2e_avg_time_per_request_ms": float(e2e_avg_req),
+            "avg_run_wall_time_per_request_ms": float(e2e_avg_req),
+            "avg_request_submit_prep_ms": float(
+                self.request_submit_prep_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
+            ),
             "e2e_avg_tokens_per_s": float(e2e_avg_tok),
         }
         # Add stage_wall_time_ms as separate fields for each stage

@@ -1493,6 +1493,7 @@ class AsyncOmniEngine:
         a queue + coroutine-switch round-trip.  The Orchestrator receives a
         ready-to-submit OmniEngineCoreRequest.
         """
+        build_msg_t0 = time.perf_counter()
         msg = self._build_add_request_message(
             request_id=request_id,
             prompt=prompt,
@@ -1507,6 +1508,12 @@ class AsyncOmniEngine:
             data_parallel_rank=data_parallel_rank,
             reasoning_ended=reasoning_ended,
             resumable=resumable,
+        )
+        build_msg_ms = (time.perf_counter() - build_msg_t0) * 1000.0
+        logger.info(
+            "[AsyncOmniEngine] req=%s _build_add_request_message took %.3f ms",
+            request_id,
+            build_msg_ms,
         )
         if self.request_queue is None:
             raise RuntimeError("request_queue is not initialized")

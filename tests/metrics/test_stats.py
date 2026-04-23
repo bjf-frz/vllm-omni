@@ -59,6 +59,8 @@ def test_orchestrator_aggregator_builds_summary() -> None:
     summary = agg.build_and_log_summary()
     overall = summary["overall_summary"]
     assert overall["e2e_requests"] == 1
+    assert overall["run_wall_time_ms"] == 70.0
+    assert overall["request_submit_prep_total_ms"] == 0.0
 
     stage_entry = _get_request_entry(summary["stage_table"], "r1")
     stage_ids = [row["stage_id"] for row in stage_entry["stages"]]
@@ -77,7 +79,8 @@ def test_build_and_log_summary_e2e_only() -> None:
     agg.e2e_events.append(
         RequestE2EStats(
             request_id="r",
-            e2e_total_ms=10.0,
+            request_latency_ms=10.0,
+            request_submit_prep_ms=0.0,
             e2e_total_tokens=5,
             transfers_total_time_ms=0.0,
             transfers_total_bytes=0,
@@ -86,6 +89,7 @@ def test_build_and_log_summary_e2e_only() -> None:
 
     summary = agg.build_and_log_summary()
     e2e_entry = _get_request_entry(summary["e2e_table"], "r")
+    assert e2e_entry["request_latency_ms"] == 10.0
     assert e2e_entry["e2e_total_tokens"] == 5
     stage_entry = _get_request_entry(summary["stage_table"], "r")
     assert stage_entry["stages"] == []
@@ -150,6 +154,7 @@ def test_build_and_log_summary_multiple_requests() -> None:
     summary = agg.build_and_log_summary()
     assert len(summary["stage_table"]) == 2
     assert {entry["request_id"] for entry in summary["e2e_table"]} == {"r1", "r2"}
+    assert summary["overall_summary"]["request_latency_total_ms"] > 0.0
     # Check that r1 has two stages and r2 has one
     r1_stage_entry = next(e for e in summary["stage_table"] if e["request_id"] == "r1")
     r2_stage_entry = next(e for e in summary["stage_table"] if e["request_id"] == "r2")

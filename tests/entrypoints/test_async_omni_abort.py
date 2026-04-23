@@ -20,8 +20,15 @@ def test_generate_accepts_request_after_repeated_cancellations():
         async def fake_abort_async(request_ids):
             aborted_request_batches.append(list(request_ids))
 
-        async def fake_process_results(request_id, metrics, final_stage_id_for_e2e, req_start_ts, wall_start_ts):
-            del metrics, final_stage_id_for_e2e, req_start_ts, wall_start_ts
+        async def fake_process_results(
+            request_id,
+            metrics,
+            final_stage_id_for_e2e,
+            req_start_ts,
+            req_submit_prep_ms,
+            wall_start_ts,
+        ):
+            del metrics, final_stage_id_for_e2e, req_start_ts, req_submit_prep_ms, wall_start_ts
             if request_id.startswith("cancel-"):
                 await asyncio.Future()
                 return

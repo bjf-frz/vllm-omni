@@ -114,10 +114,12 @@ class Omni(OmniBase):
 
             request_ids = [f"{i}_{uuid.uuid4()}" for i in range(len(request_prompts))]
             req_start_ts: dict[str, float] = {}
+            req_submit_prep_ms: dict[str, float] = {}
             wall_start_ts = time.time()
             req_final_stage_ids: dict[str, int] = {}
 
             for req_id, prompt in zip(request_ids, request_prompts):
+                request_prep_start_ts = time.time()
                 prompt_modalities = prompt.get("modalities", None) if isinstance(prompt, dict) else None
                 final_stage_id = self._compute_final_stage_id(prompt_modalities)
                 req_final_stage_ids[req_id] = final_stage_id
@@ -146,6 +148,7 @@ class Omni(OmniBase):
                     final_stage_id=final_stage_id,
                 )
                 submit_ts = time.time()
+                req_submit_prep_ms[req_id] = (submit_ts - request_prep_start_ts) * 1000.0
                 req_state.metrics.stage_first_ts[0] = submit_ts
                 req_start_ts[req_id] = submit_ts
 
@@ -175,6 +178,7 @@ class Omni(OmniBase):
                     stage_id=stage_id,
                     metrics=req_state.metrics,
                     req_start_ts=req_start_ts,
+                    req_submit_prep_ms=req_submit_prep_ms,
                     wall_start_ts=wall_start_ts,
                     final_stage_id_for_e2e=req_final_stage_ids[req_id],
                 )

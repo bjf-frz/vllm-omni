@@ -282,7 +282,9 @@ class AsyncOmni(EngineClient, OmniBase):
 
             # Track per-request metrics
             wall_start_ts = time.time()
+            request_prep_start_ts = wall_start_ts
             req_start_ts: dict[str, float] = {}
+            req_submit_prep_ms: dict[str, float] = {}
 
             # Determine the final stage for E2E stats
             final_stage_id_for_e2e = self._compute_final_stage_id(output_modalities)
@@ -321,6 +323,7 @@ class AsyncOmni(EngineClient, OmniBase):
                     final_stage_id=final_stage_id_for_e2e,
                 )
             submit_ts = time.time()
+            req_submit_prep_ms[request_id] = (submit_ts - request_prep_start_ts) * 1000.0
             req_state.metrics.stage_first_ts[0] = submit_ts
             req_start_ts[request_id] = submit_ts
 
@@ -333,6 +336,7 @@ class AsyncOmni(EngineClient, OmniBase):
                 metrics,
                 final_stage_id_for_e2e,
                 req_start_ts,
+                req_submit_prep_ms,
                 wall_start_ts,
             ):
                 yield output
@@ -479,6 +483,7 @@ class AsyncOmni(EngineClient, OmniBase):
         metrics: OrchestratorMetrics,
         final_stage_id_for_e2e: int,
         req_start_ts: dict[str, float],
+        req_submit_prep_ms: dict[str, float],
         wall_start_ts: float,
     ) -> AsyncGenerator[OmniRequestOutput, None]:
         """Read results from the Orchestrator (via the request's asyncio.Queue)
@@ -520,6 +525,7 @@ class AsyncOmni(EngineClient, OmniBase):
                 stage_id,
                 metrics,
                 req_start_ts,
+                req_submit_prep_ms,
                 wall_start_ts,
                 final_stage_id_for_e2e,
             )

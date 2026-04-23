@@ -3,7 +3,7 @@
 
 You can use these metrics in production to monitor the health and performance of the vLLM-omni system. Typical scenarios include:
 
-- **Performance Monitoring**: Track throughput (e.g., `e2e_avg_tokens_per_s`), latency (e.g., `e2e_total_ms`), and resource utilization to verify that the system meets expected standards.
+- **Performance Monitoring**: Track throughput (e.g., `e2e_avg_tokens_per_s`), latency (e.g., `request_latency_ms`), and resource utilization to verify that the system meets expected standards.
 
 - **Debugging and Troubleshooting**: Use detailed per-request metrics to diagnose issues, such as high transfer times or unexpected token counts.
 
@@ -31,9 +31,10 @@ With `--log-stats` enabled, the server will output detailed metrics logs after e
 | Field                       | Value        |
 |-----------------------------|--------------|
 | e2e_requests                | 1            |
-| e2e_wall_time_ms            | 41,299.190   |
+| run_wall_time_ms            | 41,299.190   |
+| request_latency_total_ms    | 41,299.133   |
 | e2e_total_tokens            | 5,202        |
-| e2e_avg_time_per_request_ms | 41,299.190   |
+| avg_run_wall_time_per_request_ms | 41,299.190   |
 | e2e_avg_tokens_per_s        | 125.959      |
 | e2e_stage_0_wall_time_ms    | 10,192.289   |
 | e2e_stage_1_wall_time_ms    | 30,541.409   |
@@ -43,7 +44,8 @@ With `--log-stats` enabled, the server will output detailed metrics logs after e
 
 | Field                   | Value      |
 |-------------------------|------------|
-| e2e_total_ms            | 41,299.133 |
+| request_latency_ms      | 41,299.133 |
+| request_submit_prep_ms  | 0.000      |
 | e2e_total_tokens        | 5,202      |
 | transfers_total_time_ms | 245.895    |
 | transfers_total_kbytes  | 138,089.939|
@@ -98,10 +100,13 @@ For **online inference** (serving mode), the summary is always per-request. `e2e
 | Field                     | Meaning                                                                                       |
 |---------------------------|----------------------------------------------------------------------------------------------|
 | `e2e_requests`            | Number of completed requests.                                                                |
-| `e2e_wall_time_ms`        | Wall-clock time span from run start to last completion, in ms.                               |
+| `run_wall_time_ms`        | Wall-clock time span from run start to last completion, in ms.                               |
+| `request_latency_total_ms` | Sum of per-request `request_latency_ms` across completed requests.                           |
+| `request_submit_prep_total_ms` | Sum of pre-submit request preparation time across completed requests.                    |
 | `e2e_total_tokens`        | Total tokens counted across all completed requests (stage0 input + all stage outputs).       |
-| `e2e_avg_time_per_request_ms` | Average wall time per request: `e2e_wall_time_ms / e2e_requests`.                        |
-| `e2e_avg_tokens_per_s`    | Average token throughput over wall time: `e2e_total_tokens * 1000 / e2e_wall_time_ms`.      |
+| `avg_run_wall_time_per_request_ms` | Average wall time per request: `run_wall_time_ms / e2e_requests`.                 |
+| `avg_request_submit_prep_ms` | Average pre-submit request preparation time per completed request.                        |
+| `e2e_avg_tokens_per_s`    | Average token throughput over wall time: `e2e_total_tokens * 1000 / run_wall_time_ms`.      |
 | `e2e_stage_{i}_wall_time_ms` | Wall-clock time span for stage i, in ms. Each stage's wall time is reported as a separate field, e.g., `e2e_stage_0_wall_time_ms`, `e2e_stage_1_wall_time_ms`, etc. |
 
 ---
@@ -110,7 +115,8 @@ For **online inference** (serving mode), the summary is always per-request. `e2e
 
 | Field                     | Meaning                                                               |
 |---------------------------|-----------------------------------------------------------------------|
-| `e2e_total_ms`            | End-to-end latency in ms.                                             |
+| `request_latency_ms`      | End-to-end latency in ms, starting after request preparation and ending at final completion. |
+| `request_submit_prep_ms`  | Time spent preparing and submitting the request before `request_latency_ms` starts.          |
 | `e2e_total_tokens`        | Total tokens for the request (stage0 input + all stage outputs).      |
 | `transfers_total_time_ms` | Sum of transfer edge `total_time_ms` for this request.                |
 | `transfers_total_kbytes`  | Sum of transfer kbytes for this request.                              |
