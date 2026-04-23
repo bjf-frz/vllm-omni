@@ -38,14 +38,14 @@
         ]
     },
     {
-        "test_name": "test_wan22_i2v_usp4_vae_patch4_hsdp_slicing",
-        "description": "USP=4 + VAE patch parallel=4 + HSDP + VAE slicing",
+        "test_name": "test_wan22_i2v_usp2_vae_patch2_hsdp_slicing",
+        "description": "USP=2 + VAE patch parallel=2 + HSDP + VAE slicing",
         "server_type": "vllm-omni",
         "server_params": {
             "model": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
             "serve_args": {
-                "usp": 4,
-                "vae-patch-parallel-size": 4,
+                "usp": 2,
+                "vae-patch-parallel-size": 2,
                 "use-hsdp": true,
                 "vae-use-slicing": true,
                 "enable-diffusion-pipeline-profiler": true
@@ -72,9 +72,9 @@
                     }
                 ],
                 "baseline": {
-                    "throughput_qps": 0.025,
-                    "latency_mean": 40.0,
-                    "peak_memory_mb_mean": 38000
+                    "throughput_qps": 0.02,
+                    "latency_mean": 50.0,
+                    "peak_memory_mb_mean": 52000
                 }
             },
             {
@@ -97,9 +97,9 @@
                     }
                 ],
                 "baseline": {
-                    "throughput_qps": 0.006,
-                    "latency_mean": 160.0,
-                    "peak_memory_mb_mean": 45000
+                    "throughput_qps": 0.0035,
+                    "latency_mean": 260.0,
+                    "peak_memory_mb_mean": 62000
                 }
             }
         ]
