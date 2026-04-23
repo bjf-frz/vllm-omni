@@ -497,7 +497,8 @@ def run_benchmark(
 
     log_dir = BENCHMARK_RESULT_DIR / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"{test_name}_{backend}_{timestamp}.log"
+    backend_label = backend.replace("/", "_")
+    log_file = log_dir / f"{test_name}_{backend_label}_{timestamp}.log"
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", prefix="diffusion_bench_tmp_", delete=False) as tmp:
         tmp_result_file = Path(tmp.name)
