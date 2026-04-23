@@ -659,6 +659,13 @@ def assert_result(result: dict[str, Any], params: dict[str, Any]) -> None:
             assert current <= threshold, f"{metric}: {current:.4f} > baseline {threshold}"
 
 
+def _benchmark_backend_for_task(server_type: str, task: str) -> str:
+    """Map a serving backend to the benchmark API backend for the given task."""
+    if task in {"t2v", "i2v", "ti2v"}:
+        return "v1/videos"
+    return server_type
+
+
 # ---------------------------------------------------------------------------
 # Test entry point
 # ---------------------------------------------------------------------------
@@ -684,7 +691,10 @@ def test_diffusion_performance_benchmark(diffusion_server, benchmark_params):
     """
     test_name = benchmark_params["test_name"]
     params = benchmark_params["params"]
-    backend = diffusion_server.server_type  # "vllm-omni"
+    backend = _benchmark_backend_for_task(
+        diffusion_server.server_type,
+        cast(str, params.get("task", "t2i")),
+    )
 
     result = run_benchmark(
         host=diffusion_server.host,
