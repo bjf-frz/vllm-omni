@@ -228,8 +228,7 @@ class OrchestratorAggregator:
             ar2diffusion_ms += float(stage_evt.ar2diffusion_time_ms or 0.0)
             if stage_evt.handoff_to_stage_id is not None and stage_evt.stage_handoff_time_ms > 0.0:
                 handoff = (
-                    f"{stage_evt.stage_id}->{stage_evt.handoff_to_stage_id}="
-                    f"{stage_evt.stage_handoff_time_ms:.3f}ms"
+                    f"{stage_evt.stage_id}->{stage_evt.handoff_to_stage_id}={stage_evt.stage_handoff_time_ms:.3f}ms"
                 )
                 if stage_evt.ar2diffusion_time_ms > 0.0:
                     handoff += f"(ar2diffusion={stage_evt.ar2diffusion_time_ms:.3f}ms)"
@@ -282,9 +281,7 @@ class OrchestratorAggregator:
             )
 
         edge_handoff_fields = sorted(
-            k
-            for k in summary
-            if k.startswith("stage_") and "_to_" in k and k.endswith("_handoff_time_ms")
+            k for k in summary if k.startswith("stage_") and "_to_" in k and k.endswith("_handoff_time_ms")
         )
         for handoff_field in edge_handoff_fields:
             edge_name = handoff_field.removesuffix("_handoff_time_ms")
@@ -700,9 +697,7 @@ class OrchestratorAggregator:
             "avg_stage_handoff_total_time_ms": float(
                 stage_handoff_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
             ),
-            "avg_ar2diffusion_time_ms": float(
-                ar2diffusion_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
-            ),
+            "avg_ar2diffusion_time_ms": float(ar2diffusion_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0),
             "avg_final_output_overhead_time_ms": float(
                 final_output_overhead_ms / self.e2e_count if self.e2e_count > 0 else 0.0
             ),
