@@ -99,6 +99,8 @@ For **offline inference** (batch mode), the summary includes both system-level m
 
 For **online inference** (serving mode), the summary is always per-request. `e2e_requests` is always 1, and only request-level metrics are reported for each completion.
 
+When `e2e_requests` is 1, average fields are omitted from the printed `Overall Summary` because they are identical to the total/request-level values. They remain meaningful for offline batches with multiple completed requests.
+
 ---
 
 ## Parameter Details
@@ -111,12 +113,32 @@ For **online inference** (serving mode), the summary is always per-request. `e2e
 | `request_wall_time_ms`        | Wall-clock time span from request preparation start to final completion, in ms.          |
 | `input_preprocess_time_ms` | Time spent preparing and submitting requests before the engine pipeline starts.             |
 | `engine_pipeline_time_ms` | Time from engine request submission to final completion.                                     |
+| `stage_gen_total_time_ms` | Sum of all stage `stage_gen_time_ms` values.                                                 |
+| `stage_handoff_total_time_ms` | Sum of inter-stage handoff time, measured after an upstream stage finishes and before the downstream stage is submitted. |
+| `ar2diffusion_total_time_ms` | Subset of `stage_handoff_total_time_ms` spent converting AR outputs into diffusion inputs. |
+| `final_output_overhead_time_ms` | Final engine-side overhead not covered by stage generation or inter-stage handoff.       |
+| `stage_{i}_to_{j}_handoff_time_ms` | Handoff time for a specific stage edge, e.g. `stage_0_to_1_handoff_time_ms`.       |
+| `stage_{i}_to_{j}_ar2diffusion_time_ms` | AR-to-diffusion conversion time included in that edge's handoff time.           |
 | `e2e_total_tokens`        | Total tokens counted across all completed requests (stage0 input + all stage outputs).       |
 | `avg_request_wall_time_ms` | Average wall time per request: `request_wall_time_ms / e2e_requests`.                     |
 | `avg_input_preprocess_time_ms` | Average pre-submit request preparation time per completed request.                    |
 | `avg_engine_pipeline_time_ms` | Average engine pipeline time per completed request.                                      |
+| `avg_stage_gen_total_time_ms` | Average summed stage generation time per completed request.                              |
+| `avg_stage_handoff_total_time_ms` | Average summed inter-stage handoff time per completed request.                    |
+| `avg_ar2diffusion_time_ms` | Average AR-to-diffusion conversion time per completed request.                             |
+| `avg_final_output_overhead_time_ms` | Average final engine-side overhead per completed request.                         |
 | `e2e_avg_tokens_per_s`    | Average token throughput over wall time: `e2e_total_tokens * 1000 / request_wall_time_ms`.  |
 | `e2e_stage_{i}_wall_time_ms` | Wall-clock time span for stage i, in ms. Each stage's wall time is reported as a separate field, e.g., `e2e_stage_0_wall_time_ms`, `e2e_stage_1_wall_time_ms`, etc. |
+
+### Timing Breakdown
+
+The printed summary also includes a `Timing Breakdown` section that shows the containment relationship:
+
+`request_wall_time_ms = input_preprocess_time_ms + engine_pipeline_time_ms`
+
+`engine_pipeline_time_ms = stage_gen_total_time_ms + stage_handoff_total_time_ms + final_output_overhead_time_ms`
+
+`ar2diffusion_total_time_ms` is included in `stage_handoff_total_time_ms`. For a concrete AR-to-diffusion edge, `stage_0_to_1_ar2diffusion_time_ms` is included in `stage_0_to_1_handoff_time_ms`.
 
 ---
 
@@ -146,7 +168,6 @@ For **online inference** (serving mode), the summary is always per-request. `e2e
 | `image_num`               | Number of images generated (for diffusion/image stages).                                        |
 | `resolution`              | Image resolution (for diffusion/image stages).                                                                  |
 | `postprocess_time_ms` | Diffusion/image: post-processing time in ms.                                                    |
-| `ar2diffusion_time_ms` | Time spent converting AR-stage output into the diffusion-stage prompt before diffusion request submission. |
 
 ---
 

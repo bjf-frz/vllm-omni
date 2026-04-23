@@ -37,9 +37,11 @@ def test_orchestrator_aggregator_builds_summary() -> None:
             rx_decode_time_ms=0.0,
             rx_in_flight_time_ms=0.0,
             stage_stats=StageStats(),
+            handoff_to_stage_id=1,
+            stage_handoff_time_ms=20.0,
+            ar2diffusion_time_ms=12.5,
         ),
     )
-    agg.record_ar2diffusion_time(0, "r1", 12.5)
     agg.on_stage_metrics(
         1,
         "r1",
@@ -62,11 +64,17 @@ def test_orchestrator_aggregator_builds_summary() -> None:
     assert overall["e2e_requests"] == 1
     assert overall["request_wall_time_ms"] == 70.0
     assert overall["input_preprocess_time_ms"] == 0.0
+    assert overall["stage_gen_total_time_ms"] == 50.0
+    assert overall["stage_handoff_total_time_ms"] == 20.0
+    assert overall["stage_0_to_1_handoff_time_ms"] == 20.0
+    assert overall["ar2diffusion_total_time_ms"] == 12.5
+    assert overall["stage_0_to_1_ar2diffusion_time_ms"] == 12.5
 
     stage_entry = _get_request_entry(summary["stage_table"], "r1")
     stage_ids = [row["stage_id"] for row in stage_entry["stages"]]
     assert stage_ids == [0, 1]
-    assert stage_entry["stages"][0]["ar2diffusion_time_ms"] == 12.5
+    assert "stage_handoff_time_ms" not in stage_entry["stages"][0]
+    assert "ar2diffusion_time_ms" not in stage_entry["stages"][0]
 
     transfer_entry = _get_request_entry(summary["trans_table"], "r1")
     assert transfer_entry["transfers"][0]["edge"] == "0->1"

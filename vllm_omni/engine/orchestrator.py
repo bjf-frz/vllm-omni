@@ -628,6 +628,7 @@ class Orchestrator:
                 total_token=self._agg_total_tokens[stage_id],
                 total_gen_time_ms=self._agg_total_gen_time_ms[stage_id],
             ),
+            stage_end_ts=now,
         )
 
     def _build_kv_sender_info(self, sender_stage_ids: list[int]) -> dict[int, dict[str, Any]] | None:
@@ -676,7 +677,9 @@ class Orchestrator:
         next_stage_resumable = is_streaming_session and not is_final_update
 
         if next_client.stage_type == "diffusion":
+            handoff_start_ts = getattr(stage_metrics, "stage_end_ts", None) or _time.time()
             self.stage_clients[stage_id].set_engine_outputs([output])
+            ar2diffusion_ms = 0.0
             if next_client.custom_process_input_func is not None:
                 _t_ar2d = _time.perf_counter()
                 diffusion_prompt = next_client.custom_process_input_func(
@@ -686,6 +689,7 @@ class Orchestrator:
                     False,
                 )
                 _dt_ar2d = (_time.perf_counter() - _t_ar2d) * 1000
+                ar2diffusion_ms = _dt_ar2d
                 if stage_metrics is not None:
                     stage_metrics.ar2diffusion_time_ms = _dt_ar2d
                 if isinstance(diffusion_prompt, list):
@@ -737,7 +741,13 @@ class Orchestrator:
                     params,
                     kv_sender_info=kv_sender_info,
                 )
-            req_state.stage_submit_ts[next_stage_id] = _time.time()
+            next_submit_ts = _time.time()
+            req_state.stage_submit_ts[next_stage_id] = next_submit_ts
+            if stage_metrics is not None:
+                stage_metrics.handoff_to_stage_id = next_stage_id
+                stage_metrics.stage_handoff_time_ms = max(0.0, (next_submit_ts - handoff_start_ts) * 1000.0)
+                if stage_metrics.ar2diffusion_time_ms == 0.0:
+                    stage_metrics.ar2diffusion_time_ms = ar2diffusion_ms
             return
 
         # PD disaggregation: prefill → decode routing uses original prompt + KV transfer params
