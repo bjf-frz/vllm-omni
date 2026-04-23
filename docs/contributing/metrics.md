@@ -3,7 +3,7 @@
 
 You can use these metrics in production to monitor the health and performance of the vLLM-omni system. Typical scenarios include:
 
-- **Performance Monitoring**: Track throughput (e.g., `e2e_avg_tokens_per_s`), latency (e.g., `request_latency_ms`), and resource utilization to verify that the system meets expected standards.
+- **Performance Monitoring**: Track throughput (e.g., `e2e_avg_tokens_per_s`), latency (e.g., `request_wall_time_ms` / `engine_pipeline_time_ms`), and resource utilization to verify that the system meets expected standards.
 
 - **Debugging and Troubleshooting**: Use detailed per-request metrics to diagnose issues, such as high transfer times or unexpected token counts.
 
@@ -25,16 +25,23 @@ python openai_chat_completion_client_for_multimodal_generation.py --query-type u
 
 With `--log-stats` enabled, the server will output detailed metrics logs after each request. Example output:
 
+For multi-stage pipelines, vLLM-Omni also emits a concise per-request timing line:
+
+```text
+[OmniTiming] req=chatcmpl-a0edd05 total=32.99s preprocess=2.80s engine=30.19s stages=[0:ar=16.23s,1:diffusion=13.96s] transfers=[0->1=0.780ms]
+```
+
 
 #### Overall Summary
 
 | Field                       | Value        |
 |-----------------------------|--------------|
 | e2e_requests                | 1            |
-| run_wall_time_ms            | 41,299.190   |
-| request_latency_total_ms    | 41,299.133   |
+| request_wall_time_ms        | 41,299.190   |
+| input_preprocess_time_ms    |     57.000   |
+| engine_pipeline_time_ms     | 41,299.133   |
 | e2e_total_tokens            | 5,202        |
-| avg_run_wall_time_per_request_ms | 41,299.190   |
+| avg_request_wall_time_ms    | 41,299.190   |
 | e2e_avg_tokens_per_s        | 125.959      |
 | e2e_stage_0_wall_time_ms    | 10,192.289   |
 | e2e_stage_1_wall_time_ms    | 30,541.409   |
@@ -44,8 +51,9 @@ With `--log-stats` enabled, the server will output detailed metrics logs after e
 
 | Field                   | Value      |
 |-------------------------|------------|
-| request_latency_ms      | 41,299.133 |
-| request_submit_prep_ms  | 0.000      |
+| request_wall_time_ms    | 41,356.133 |
+| input_preprocess_time_ms |    57.000 |
+| engine_pipeline_time_ms | 41,299.133 |
 | e2e_total_tokens        | 5,202      |
 | transfers_total_time_ms | 245.895    |
 | transfers_total_kbytes  | 138,089.939|
@@ -100,13 +108,15 @@ For **online inference** (serving mode), the summary is always per-request. `e2e
 | Field                     | Meaning                                                                                       |
 |---------------------------|----------------------------------------------------------------------------------------------|
 | `e2e_requests`            | Number of completed requests.                                                                |
-| `run_wall_time_ms`        | Wall-clock time span from run start to last completion, in ms.                               |
-| `request_latency_total_ms` | Sum of per-request `request_latency_ms` across completed requests.                           |
-| `request_submit_prep_total_ms` | Sum of pre-submit request preparation time across completed requests.                    |
+| `request_wall_time_ms`        | Wall-clock time span from request preparation start to final completion, in ms.          |
+| `input_preprocess_time_ms` | Time spent preparing and submitting requests before the engine pipeline starts.             |
+| `build_add_request_message_time_ms` | Time spent inside `AsyncOmniEngine._build_add_request_message()`.                  |
+| `engine_pipeline_time_ms` | Time from engine request submission to final completion.                                     |
 | `e2e_total_tokens`        | Total tokens counted across all completed requests (stage0 input + all stage outputs).       |
-| `avg_run_wall_time_per_request_ms` | Average wall time per request: `run_wall_time_ms / e2e_requests`.                 |
-| `avg_request_submit_prep_ms` | Average pre-submit request preparation time per completed request.                        |
-| `e2e_avg_tokens_per_s`    | Average token throughput over wall time: `e2e_total_tokens * 1000 / run_wall_time_ms`.      |
+| `avg_request_wall_time_ms` | Average wall time per request: `request_wall_time_ms / e2e_requests`.                     |
+| `avg_input_preprocess_time_ms` | Average pre-submit request preparation time per completed request.                    |
+| `avg_engine_pipeline_time_ms` | Average engine pipeline time per completed request.                                      |
+| `e2e_avg_tokens_per_s`    | Average token throughput over wall time: `e2e_total_tokens * 1000 / request_wall_time_ms`.  |
 | `e2e_stage_{i}_wall_time_ms` | Wall-clock time span for stage i, in ms. Each stage's wall time is reported as a separate field, e.g., `e2e_stage_0_wall_time_ms`, `e2e_stage_1_wall_time_ms`, etc. |
 
 ---
@@ -115,8 +125,10 @@ For **online inference** (serving mode), the summary is always per-request. `e2e
 
 | Field                     | Meaning                                                               |
 |---------------------------|-----------------------------------------------------------------------|
-| `request_latency_ms`      | End-to-end latency in ms, starting after request preparation and ending at final completion. |
-| `request_submit_prep_ms`  | Time spent preparing and submitting the request before `request_latency_ms` starts.          |
+| `request_wall_time_ms`    | End-to-end latency in ms, including input preprocessing and engine pipeline time.            |
+| `input_preprocess_time_ms` | Time spent preparing and submitting the request before `engine_pipeline_time_ms` starts.    |
+| `build_add_request_message_time_ms` | Time spent inside `_build_add_request_message()` for this request.                 |
+| `engine_pipeline_time_ms` | Time from engine request submission to final completion.                                     |
 | `e2e_total_tokens`        | Total tokens for the request (stage0 input + all stage outputs).      |
 | `transfers_total_time_ms` | Sum of transfer edge `total_time_ms` for this request.                |
 | `transfers_total_kbytes`  | Sum of transfer kbytes for this request.                              |

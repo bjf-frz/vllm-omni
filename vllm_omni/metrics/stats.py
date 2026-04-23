@@ -36,6 +36,8 @@ class StageRequestStats:
     rx_in_flight_time_ms: float
     stage_stats: StageStats
     stage_id: int | None = None
+    stage_name: str | None = None
+    stage_type: str | None = None
     final_output_type: str | None = None
     request_id: str | None = None
     postprocess_time_ms: float = 0.0
@@ -74,15 +76,17 @@ class TransferEdgeStats:
 @dataclass
 class RequestE2EStats:
     request_id: str
-    request_latency_ms: float
-    request_submit_prep_ms: float
+    request_wall_time_ms: float
+    input_preprocess_time_ms: float
+    build_add_request_message_time_ms: float
+    engine_pipeline_time_ms: float
     e2e_total_tokens: int
     transfers_total_time_ms: float
     transfers_total_bytes: int
 
     @property
     def e2e_tpt(self) -> float:
-        return (self.request_latency_ms / self.e2e_total_tokens) if self.e2e_total_tokens > 0 else 0.0
+        return (self.engine_pipeline_time_ms / self.e2e_total_tokens) if self.e2e_total_tokens > 0 else 0.0
 
 
 # === Field Configuration ===
@@ -120,10 +124,12 @@ class OrchestratorAggregator:
         log_stats: bool,
         wall_start_ts: float,
         final_stage_id_for_e2e: dict[str, int] | int,
+        stage_metadata: list[dict[str, Any]] | None = None,
     ) -> None:
         self.num_stages = int(num_stages)
         self.log_stats = bool(log_stats)
         self.final_stage_id_for_e2e = final_stage_id_for_e2e
+        self.stage_metadata = list(stage_metadata or [])
         self.init_run_state(wall_start_ts)
         self.stage_events: dict[str, list[StageRequestStats]] = {}
         self.transfer_events: dict[
@@ -134,8 +140,9 @@ class OrchestratorAggregator:
     def init_run_state(self, wall_start_ts: float) -> None:
         # Per-run aggregates and timing state
         self.stage_total_tokens = [0 for _ in range(self.num_stages)]
-        self.request_latency_total_ms = 0.0
-        self.request_submit_prep_total_ms = 0.0
+        self.engine_pipeline_total_ms = 0.0
+        self.input_preprocess_total_ms = 0.0
+        self.build_add_request_message_total_ms = 0.0
         self.e2e_total_tokens = 0
         self.e2e_count = 0
         self.e2e_done = set()
@@ -149,6 +156,62 @@ class OrchestratorAggregator:
         self.diffusion_metrics: defaultdict[str, defaultdict[str, float]] = defaultdict(
             lambda: defaultdict(float)
         )  # {request_id: {diffusion_metrics_key: accumulated_metrics_data}}
+
+    def _get_stage_metadata(self, stage_id: int | None) -> dict[str, Any]:
+        if stage_id is None or stage_id < 0 or stage_id >= len(self.stage_metadata):
+            return {}
+        meta = self.stage_metadata[stage_id]
+        return dict(meta) if isinstance(meta, dict) else {}
+
+    @staticmethod
+    def _get_stage_type(stage_meta: dict[str, Any]) -> str:
+        return str(stage_meta.get("stage_type") or "unknown")
+
+    @classmethod
+    def _get_stage_name(cls, stage_id: int, stage_meta: dict[str, Any]) -> str:
+        stage_type = cls._get_stage_type(stage_meta)
+        model_stage = stage_meta.get("model_stage")
+        if model_stage:
+            return str(model_stage)
+        if stage_type == "diffusion":
+            return "diffusion"
+        return f"stage_{stage_id}"
+
+    def _stage_label(self, stage_id: int | None) -> str:
+        if stage_id is None:
+            return "unknown"
+        stage_meta = self._get_stage_metadata(stage_id)
+        return f"{stage_id}:{self._get_stage_name(stage_id, stage_meta)}"
+
+    def _format_seconds(self, ms: float) -> str:
+        return f"{ms / 1000.0:.2f}s"
+
+    def _log_omni_timing(self, evt: RequestE2EStats) -> None:
+        rid = evt.request_id
+        stages = []
+        for stage_evt in sorted(
+            self.stage_events.get(rid, []),
+            key=lambda e: e.stage_id if e.stage_id is not None else -1,
+        ):
+            stages.append(
+                f"{self._stage_label(stage_evt.stage_id)}={self._format_seconds(stage_evt.stage_gen_time_ms)}"
+            )
+        transfers = []
+        for transfer_evt in sorted(
+            [e for e in self.transfer_events.values() if e.request_id == rid],
+            key=lambda e: (e.from_stage, e.to_stage),
+        ):
+            transfers.append(f"{transfer_evt.from_stage}->{transfer_evt.to_stage}={transfer_evt.total_time_ms:.3f}ms")
+
+        logger.info(
+            "[OmniTiming] req=%s total=%s preprocess=%s engine=%s stages=[%s] transfers=[%s]",
+            rid,
+            self._format_seconds(evt.request_wall_time_ms),
+            self._format_seconds(evt.input_preprocess_time_ms),
+            self._format_seconds(evt.engine_pipeline_time_ms),
+            ",".join(stages),
+            ",".join(transfers),
+        )
 
     def _get_or_create_transfer_event(
         self,
@@ -328,6 +391,9 @@ class OrchestratorAggregator:
         "Convert dict to StageRequestStats if needed."
         stats = metrics
         stats.stage_id = stage_id
+        stage_meta = self._get_stage_metadata(stage_id)
+        stats.stage_type = self._get_stage_type(stage_meta)
+        stats.stage_name = self._get_stage_name(stage_id, stage_meta)
         stats.request_id = req_id
         stats.final_output_type = final_output_type
         stats.diffusion_metrics = (
@@ -425,7 +491,8 @@ class OrchestratorAggregator:
         stage_id: int,
         req_id: Any,
         req_start_ts: float,
-        request_submit_prep_ms: float = 0.0,
+        input_preprocess_time_ms: float = 0.0,
+        build_add_request_message_time_ms: float = 0.0,
     ) -> None:
         rid_key = str(req_id)
         if rid_key in self.e2e_done:
@@ -436,7 +503,10 @@ class OrchestratorAggregator:
         prev_last = self.stage_last_ts[stage_id]
         self.stage_last_ts[stage_id] = _t1 if prev_last is None else max(prev_last, _t1)
         self.last_finish_ts = max(self.last_finish_ts, _t1)
-        e2e_ms = (_t1 - _t0) * 1000.0
+        engine_pipeline_ms = (_t1 - _t0) * 1000.0
+        input_preprocess_ms = float(input_preprocess_time_ms)
+        build_msg_ms = float(build_add_request_message_time_ms)
+        request_wall_ms = engine_pipeline_ms + input_preprocess_ms
 
         # Sum tokens from all stages for this request
         # Include input tokens from stage 0 + output tokens from all stages
@@ -447,15 +517,18 @@ class OrchestratorAggregator:
                     total_tokens += int(evt.num_tokens_in)
                 total_tokens += int(evt.num_tokens_out)
 
-        self.request_latency_total_ms += e2e_ms
-        self.request_submit_prep_total_ms += float(request_submit_prep_ms)
+        self.engine_pipeline_total_ms += engine_pipeline_ms
+        self.input_preprocess_total_ms += input_preprocess_ms
+        self.build_add_request_message_total_ms += build_msg_ms
         self.e2e_total_tokens += total_tokens
         self.e2e_count += 1
         self.e2e_done.add(rid_key)
         per_req_record = RequestE2EStats(
             request_id=rid_key,
-            request_latency_ms=e2e_ms,
-            request_submit_prep_ms=float(request_submit_prep_ms),
+            request_wall_time_ms=request_wall_ms,
+            input_preprocess_time_ms=input_preprocess_ms,
+            build_add_request_message_time_ms=build_msg_ms,
+            engine_pipeline_time_ms=engine_pipeline_ms,
             e2e_total_tokens=total_tokens,
             transfers_total_time_ms=float(
                 sum(evt.total_time_ms for evt in self.transfer_events.values() if evt.request_id == rid_key)
@@ -465,6 +538,9 @@ class OrchestratorAggregator:
             ),
         )
         self.e2e_events.append(per_req_record)
+
+        if self.num_stages > 1:
+            self._log_omni_timing(per_req_record)
 
     def build_and_log_summary(self) -> dict[str, Any]:
         if not self.log_stats:
@@ -487,13 +563,17 @@ class OrchestratorAggregator:
 
         overall_summary = {
             "e2e_requests": int(self.e2e_count),
-            "run_wall_time_ms": float(wall_time_ms),
-            "request_latency_total_ms": float(self.request_latency_total_ms),
-            "request_submit_prep_total_ms": float(self.request_submit_prep_total_ms),
+            "request_wall_time_ms": float(wall_time_ms),
+            "input_preprocess_time_ms": float(self.input_preprocess_total_ms),
+            "build_add_request_message_time_ms": float(self.build_add_request_message_total_ms),
+            "engine_pipeline_time_ms": float(self.engine_pipeline_total_ms),
             "e2e_total_tokens": int(self.e2e_total_tokens),
-            "avg_run_wall_time_per_request_ms": float(e2e_avg_req),
-            "avg_request_submit_prep_ms": float(
-                self.request_submit_prep_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
+            "avg_request_wall_time_ms": float(e2e_avg_req),
+            "avg_input_preprocess_time_ms": float(
+                self.input_preprocess_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
+            ),
+            "avg_engine_pipeline_time_ms": float(
+                self.engine_pipeline_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
             ),
             "e2e_avg_tokens_per_s": float(e2e_avg_tok),
         }
@@ -561,7 +641,11 @@ class OrchestratorAggregator:
             # then remove diffusion_metrics from the table
             stage_rows = []
             for evt in stage_evts:
-                row = {"stage_id": evt.stage_id, **_build_row(evt, local_stage_fields)}
+                row = {
+                    "stage": self._stage_label(evt.stage_id),
+                    "stage_id": evt.stage_id,
+                    **_build_row(evt, local_stage_fields),
+                }
                 if evt.diffusion_metrics:
                     row.update(evt.diffusion_metrics)
                 row.pop("diffusion_metrics", None)  # Remove the dict itself
@@ -574,7 +658,7 @@ class OrchestratorAggregator:
                 all_value_fields = set()
                 for row in stage_rows:
                     for k in row.keys():
-                        if k != "stage_id":
+                        if k not in ("stage", "stage_id"):
                             all_value_fields.add(k)
                 value_fields_list = []
                 for field in sorted(all_value_fields):
@@ -593,7 +677,7 @@ class OrchestratorAggregator:
                         _format_table(
                             f"StageRequestStats [request_id={rid}]",
                             stage_rows,
-                            column_key="stage_id",
+                            column_key="stage",
                             value_fields=value_fields_list,
                         ),
                     )

@@ -765,6 +765,7 @@ def finalize_initialized_stages(
             "final_output": stage_client.final_output,
             "final_output_type": stage_client.final_output_type,
             "stage_type": stage_client.stage_type,
+            "model_stage": getattr(stage_client, "model_stage", None),
         }
         for stage_client in initialized_stage_clients
     ]

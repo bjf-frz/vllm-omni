@@ -7,6 +7,7 @@ import time
 import types
 import weakref
 from collections.abc import Sequence
+from pprint import pformat
 from typing import TYPE_CHECKING, Any, Literal
 
 import huggingface_hub
@@ -249,6 +250,9 @@ class OmniBase(PDDisaggregationMixin):
         try:
             if req_state is None or req_state.metrics is None:
                 return
+            summary = req_state.metrics.build_and_log_summary()
+            if summary:
+                logger.debug("[Summary] %s", pformat(summary, sort_dicts=False))
         except Exception:
             logger.exception(
                 "[%s] Failed to build/log summary for req=%s",
@@ -368,7 +372,8 @@ class OmniBase(PDDisaggregationMixin):
         stage_id: int,
         metrics: OrchestratorMetrics,
         req_start_ts: dict[str, float],
-        req_submit_prep_ms: dict[str, float],
+        input_preprocess_time_ms: dict[str, float],
+        build_add_request_message_time_ms: dict[str, float],
         wall_start_ts: float,
         final_stage_id_for_e2e: int,
     ) -> OmniRequestOutput | None:
@@ -399,7 +404,8 @@ class OmniBase(PDDisaggregationMixin):
                     stage_id,
                     req_id,
                     req_start_ts.get(req_id, wall_start_ts),
-                    req_submit_prep_ms=req_submit_prep_ms.get(req_id, 0.0),
+                    input_preprocess_time_ms=input_preprocess_time_ms.get(req_id, 0.0),
+                    build_add_request_message_time_ms=build_add_request_message_time_ms.get(req_id, 0.0),
                 )
         except Exception:
             logger.exception("[%s] Finalize request handling error", self.__class__.__name__)

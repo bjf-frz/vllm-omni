@@ -25,10 +25,18 @@ def test_generate_accepts_request_after_repeated_cancellations():
             metrics,
             final_stage_id_for_e2e,
             req_start_ts,
-            req_submit_prep_ms,
+            input_preprocess_time_ms,
+            build_add_request_message_time_ms,
             wall_start_ts,
         ):
-            del metrics, final_stage_id_for_e2e, req_start_ts, req_submit_prep_ms, wall_start_ts
+            del (
+                metrics,
+                final_stage_id_for_e2e,
+                req_start_ts,
+                input_preprocess_time_ms,
+                build_add_request_message_time_ms,
+                wall_start_ts,
+            )
             if request_id.startswith("cancel-"):
                 await asyncio.Future()
                 return

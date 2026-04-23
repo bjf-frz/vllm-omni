@@ -246,7 +246,8 @@ def _setup_ipc_mocks(monkeypatch):
 
 def _setup_log_mocks(monkeypatch):
     class _FakeOrchestratorAggregator:
-        def __init__(self, num_stages, enable_stats, wall_start_ts, final_stage_id_for_e2e=None):
+        def __init__(self, num_stages, enable_stats, wall_start_ts, final_stage_id_for_e2e=None, **kwargs):
+            del kwargs
             self.num_stages = num_stages
             self.enable_stats = enable_stats
             self.stage_first_ts = [None] * num_stages
@@ -255,14 +256,22 @@ def _setup_log_mocks(monkeypatch):
             self.accumulated_gen_time_ms = {}
             self.e2e_done = set()
             self.e2e_count = 0
-            self.request_latency_total_ms = 0.0
-            self.request_submit_prep_total_ms = 0.0
+            self.engine_pipeline_total_ms = 0.0
+            self.input_preprocess_total_ms = 0.0
+            self.build_add_request_message_total_ms = 0.0
 
         def on_stage_metrics(self, stage_id, req_id, metrics, final_output_type=None):
             pass
 
-        def on_finalize_request(self, stage_id, req_id, start_ts, request_submit_prep_ms=0.0):
-            del start_ts, request_submit_prep_ms
+        def on_finalize_request(
+            self,
+            stage_id,
+            req_id,
+            start_ts,
+            input_preprocess_time_ms=0.0,
+            build_add_request_message_time_ms=0.0,
+        ):
+            del start_ts, input_preprocess_time_ms, build_add_request_message_time_ms
             self.e2e_done.add(req_id)
 
         def on_forward(self, from_stage, to_stage, req_id, size_bytes, tx_ms, use_shm):
