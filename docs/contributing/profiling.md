@@ -148,13 +148,21 @@ omni.start_profile()
 omni.stop_profile()
 ```
 
-For offline example scripts under `examples/offline_inference/`, torch profiling is commonly enabled by setting `VLLM_TORCH_PROFILER_DIR`. Those scripts check this environment variable and automatically call `start_profile()` / `stop_profile()` around generation.
+For diffusion offline example scripts under `examples/offline_inference/`, pass `--profiler-config` as a JSON object. The script enables profiling when this argument is set and wraps generation with `start_profile()` / `stop_profile()`.
 
 Example:
 
 ```bash
-VLLM_TORCH_PROFILER_DIR=./perf \
-python examples/offline_inference/image_to_video/image_to_video.py ...
+python examples/offline_inference/image_to_video/image_to_video.py \
+  --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \
+  --image input.jpg \
+  --prompt "A cat playing with yarn" \
+  --profiler-config '{
+    "profiler": "torch",
+    "torch_profiler_dir": "./perf",
+    "torch_profiler_record_shapes": true,
+    "torch_profiler_with_stack": true
+  }'
 ```
 
 Examples:
