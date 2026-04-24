@@ -15,7 +15,7 @@ def _get_request_entry(table: list[dict], request_id: str) -> dict:
     raise AssertionError(f"request_id={request_id} not found")
 
 
-def test_orchestrator_aggregator_builds_summary() -> None:
+def test_orchestrator_aggregator_builds_summary(monkeypatch: pytest.MonkeyPatch) -> None:
     agg = OrchestratorAggregator(num_stages=2, log_stats=True, wall_start_ts=0.0, final_stage_id_for_e2e=1)
     agg.stage_first_ts[0] = 0.0
     agg.stage_last_ts[0] = 0.03
@@ -40,6 +40,7 @@ def test_orchestrator_aggregator_builds_summary() -> None:
             handoff_to_stage_id=1,
             stage_handoff_time_ms=20.0,
             ar2diffusion_time_ms=12.5,
+            output_processor_time_ms=7.0,
         ),
     )
     agg.on_stage_metrics(
@@ -57,15 +58,19 @@ def test_orchestrator_aggregator_builds_summary() -> None:
             stage_stats=StageStats(),
         ),
     )
+    agg.record_final_output_time("r1", 3.0)
+    monkeypatch.setattr("vllm_omni.metrics.stats.time.time", lambda: 0.07)
     agg.on_finalize_request(1, "r1", req_start_ts=0.0)
 
     summary = agg.build_and_log_summary()
     overall = summary["overall_summary"]
-    assert overall["e2e_requests"] == 1
+    assert overall["num_of_requests"] == 1
     assert overall["request_wall_time_ms"] == 70.0
     assert overall["input_preprocess_time_ms"] == 0.0
     assert overall["stage_gen_total_time_ms"] == 50.0
+    assert overall["output_processor_total_time_ms"] == 7.0
     assert overall["stage_handoff_total_time_ms"] == 20.0
+    assert overall["final_output_total_time_ms"] == 3.0
     assert overall["stage_0_to_1_handoff_time_ms"] == 20.0
     assert overall["ar2diffusion_total_time_ms"] == 12.5
     assert overall["stage_0_to_1_ar2diffusion_time_ms"] == 12.5
@@ -81,7 +86,8 @@ def test_orchestrator_aggregator_builds_summary() -> None:
     assert transfer_entry["transfers"][0]["size_kbytes"] == 1.0
 
     e2e_entry = _get_request_entry(summary["e2e_table"], "r1")
-    assert e2e_entry["e2e_total_tokens"] == 10
+    assert e2e_entry["total_tokens"] == 10
+    assert e2e_entry["final_output_time_ms"] == 3.0
 
 
 def test_build_and_log_summary_e2e_only() -> None:
@@ -92,7 +98,7 @@ def test_build_and_log_summary_e2e_only() -> None:
             request_wall_time_ms=10.0,
             input_preprocess_time_ms=0.0,
             engine_pipeline_time_ms=10.0,
-            e2e_total_tokens=5,
+            total_tokens=5,
             transfers_total_time_ms=0.0,
             transfers_total_bytes=0,
         )
@@ -102,7 +108,7 @@ def test_build_and_log_summary_e2e_only() -> None:
     e2e_entry = _get_request_entry(summary["e2e_table"], "r")
     assert e2e_entry["request_wall_time_ms"] == 10.0
     assert e2e_entry["engine_pipeline_time_ms"] == 10.0
-    assert e2e_entry["e2e_total_tokens"] == 5
+    assert e2e_entry["total_tokens"] == 5
     stage_entry = _get_request_entry(summary["stage_table"], "r")
     assert stage_entry["stages"] == []
 

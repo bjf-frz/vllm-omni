@@ -396,20 +396,9 @@ class OmniBase(PDDisaggregationMixin):
         if not stage_meta["final_output"]:
             return None
 
-        try:
-            rid_key = str(req_id)
-            if stage_id == final_stage_id_for_e2e and rid_key not in metrics.e2e_done and finished:
-                metrics.on_finalize_request(
-                    stage_id,
-                    req_id,
-                    req_start_ts.get(req_id, wall_start_ts),
-                    input_preprocess_time_ms=input_preprocess_time_ms.get(req_id, 0.0),
-                )
-        except Exception:
-            logger.exception("[%s] Finalize request handling error", self.__class__.__name__)
-
+        final_output_start = time.perf_counter()
         images = getattr(engine_outputs, "images", []) if stage_meta["final_output_type"] == "image" else []
-        return OmniRequestOutput(
+        output_to_yield = OmniRequestOutput(
             request_id=req_id or "",
             stage_id=stage_id,
             final_output_type=stage_meta["final_output_type"],
@@ -423,6 +412,21 @@ class OmniBase(PDDisaggregationMixin):
             stage_durations=stage_durations,
             peak_memory_mb=peak_memory_mb,
         )
+        metrics.record_final_output_time(req_id, (time.perf_counter() - final_output_start) * 1000.0)
+
+        try:
+            rid_key = str(req_id)
+            if stage_id == final_stage_id_for_e2e and rid_key not in metrics.e2e_done and finished:
+                metrics.on_finalize_request(
+                    stage_id,
+                    req_id,
+                    req_start_ts.get(req_id, wall_start_ts),
+                    input_preprocess_time_ms=input_preprocess_time_ms.get(req_id, 0.0),
+                )
+        except Exception:
+            logger.exception("[%s] Finalize request handling error", self.__class__.__name__)
+
+        return output_to_yield
 
     def shutdown(self) -> None:
         logger.info("[%s] Shutting down", self.__class__.__name__)

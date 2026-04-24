@@ -109,6 +109,7 @@ class OrchestratorRequestState:
 
     # Metrics: timestamp when request was submitted to each stage
     stage_submit_ts: dict[int, float] = field(default_factory=dict)
+    output_processor_time_ms: dict[int, float] = field(default_factory=dict)
     mm_processor_kwargs: dict | None = None
     mm_features: list | None = None
 
@@ -597,7 +598,9 @@ class Orchestrator:
         """
         now = _time.time()
         submit_ts = req_state.stage_submit_ts.get(stage_id, now)
-        stage_gen_time_ms = (now - submit_ts) * 1000.0
+        output_processor_time_ms = float(req_state.output_processor_time_ms.get(stage_id, 0.0))
+        stage_wall_time_ms = (now - submit_ts) * 1000.0
+        stage_gen_time_ms = max(0.0, stage_wall_time_ms - output_processor_time_ms)
 
         num_tokens_out = count_tokens_from_outputs(request_outputs)
         num_tokens_in = 0
@@ -619,6 +622,7 @@ class Orchestrator:
             num_tokens_in=num_tokens_in,
             num_tokens_out=num_tokens_out,
             stage_gen_time_ms=stage_gen_time_ms,
+            output_processor_time_ms=output_processor_time_ms,
             batch_id=batch_id,
             batch_size=1,
             rx_decode_time_ms=0.0,
@@ -862,11 +866,24 @@ class Orchestrator:
         """
         processor = self.output_processors[stage_id]
 
+        output_processor_start = _time.perf_counter()
         processed = processor.process_outputs(
             raw_outputs.outputs,
             raw_outputs.timestamp,
             None,
         )
+        output_processor_time_ms = (_time.perf_counter() - output_processor_start) * 1000.0
+        processed_request_ids = {output.request_id for output in processed.request_outputs}
+        if processed_request_ids:
+            # process_outputs is batch-scoped, so attribute the batch cost evenly.
+            per_request_time_ms = output_processor_time_ms / len(processed_request_ids)
+            for request_id in processed_request_ids:
+                req_state = self.request_states.get(request_id)
+                if req_state is not None:
+                    req_state.output_processor_time_ms[stage_id] = (
+                        req_state.output_processor_time_ms.get(stage_id, 0.0) + per_request_time_ms
+                    )
+
         for eco in raw_outputs.outputs:
             if not hasattr(eco, "request_id"):
                 continue
