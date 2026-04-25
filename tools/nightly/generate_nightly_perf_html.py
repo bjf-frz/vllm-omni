@@ -222,6 +222,10 @@ def _iter_diffusion_json_records(input_dir: str) -> Iterable[dict[str, Any]]:
             result = flat.pop("result", None)
             if isinstance(result, dict):
                 flat.update(result)
+            if not flat.get("endpoint") and flat.get("backend"):
+                flat["endpoint"] = flat.get("backend")
+            flat.pop("backend", None)
+            flat.pop("API Backend", None)
             if "date" not in flat or not flat.get("date"):
                 flat["date"] = filename_meta.get("date") or datetime.now(
                     timezone.utc,
@@ -1183,7 +1187,7 @@ function filterRows(rows, filters) {{
     ) {{
       return false;
     }}
-    if (filters.backend && String(row.backend || "") !== filters.backend) return false;
+    if (filters.backend && String(row[filters.backendKey] || "") !== filters.backend) return false;
     if (
       filters.extraKey &&
       filters.extraValue &&
@@ -1223,12 +1227,14 @@ function initSection(prefix, columns, data, numericCols, groups) {{
 
   const modelKey = prefix === "diff" ? "model" : "model_id";
   const datasetKey = prefix === "diff" ? "dataset" : "dataset_name";
+  const backendKey = prefix === "diff" ? "endpoint" : "backend";
+  const backendLabel = prefix === "diff" ? "Endpoint" : "Backend";
   const extraKey = prefix === "diff" ? "" : "tokenizer_id";
   const metaKeys = prefix === "diff"
     ? ["test_name"]
     : ["test_name", "max_concurrency", "num_prompts"];
   const configFields = prefix === "diff"
-    ? ["test_name", "model", "backend", "dataset"]
+    ? ["test_name", "model", "endpoint", "dataset"]
     : [
         "endpoint_type",
         "backend",
@@ -1265,6 +1271,7 @@ function initSection(prefix, columns, data, numericCols, groups) {{
       extraKey,
       modelKey,
       datasetKey,
+      backendKey,
     }};
   }}
 
@@ -1296,7 +1303,7 @@ function initSection(prefix, columns, data, numericCols, groups) {{
     }}
     fillSelect(
       backendList,
-      uniqSorted(baseRows.map((row) => row.backend)),
+      uniqSorted(baseRows.map((row) => row[backendKey])),
       backendInput.value,
     );
     if (extraList) {{
@@ -1378,7 +1385,7 @@ function initSection(prefix, columns, data, numericCols, groups) {{
     }});
 
     if (!backendInput.value.trim()) {{
-      backendInput.value = firstValue(rows, "backend");
+      backendInput.value = firstValue(rows, backendKey);
     }}
     rows = filterRows(data, {{
       ...currentFilters(),
@@ -1465,7 +1472,7 @@ function initSection(prefix, columns, data, numericCols, groups) {{
               `<div class="kv-value"><code>${{escapeHtml(filters.numPrompts || "All")}}</code></div></div>`
             )
         }}
-        <div class="kv-row"><div class="kv-label">Backend</div><div class="kv-value"><code>${{escapeHtml(
+        <div class="kv-row"><div class="kv-label">${{backendLabel}}</div><div class="kv-value"><code>${{escapeHtml(
           filters.backend || "All",
         )}}</code></div></div>
         ${{
@@ -1707,7 +1714,7 @@ window.addEventListener("load", () => {{
                 'Diffusion</h2><div class="section-subtitle">Image generation '
                 "benchmark history with throughput and latency trend views.</div>"
                 '</div><div class="section-pills"><div class="pill"><strong>'
-                "Grouping</strong> test_name + model + backend + dataset</div>"
+                "Grouping</strong> test_name + model + endpoint + dataset</div>"
                 '<div class="pill"><strong>Snapshots</strong> single-point series '
                 "stay readable</div></div></div>"
             ),
@@ -1736,7 +1743,7 @@ window.addEventListener("load", () => {{
             "        </div>",
             '        <div class="toolbar-row secondary">',
             (
-                '        <div class="filter-field compact"><label>backend</label>'
+                '        <div class="filter-field compact"><label>endpoint</label>'
                 '<select class="filter-select" id="diff-backend"></select></div>'
             ),
             (
@@ -1803,7 +1810,7 @@ def generate_html_report(input_dir: str, diffusion_input_dir: str, output_file: 
         "date",
         "test_name",
         "model",
-        "backend",
+        "endpoint",
         "dataset",
         "task",
         "duration",

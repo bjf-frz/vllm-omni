@@ -60,7 +60,7 @@ DIFFUSION_SUMMARY_COLUMNS: tuple[str, ...] = (
     "date",
     "test_name",
     "model",
-    "backend",
+    "endpoint",
     "dataset",
     "task",
     "completed_requests",
@@ -528,6 +528,10 @@ def _process_diffusion_record(record: dict[str, Any]) -> dict[str, Any]:
     """Normalize a diffusion record by merging `result` and flattening stage metrics."""
     flat = record.copy()
     flat.update(flat.pop("result", {}))
+    if not flat.get("endpoint") and flat.get("backend"):
+        flat["endpoint"] = flat.get("backend")
+    flat.pop("backend", None)
+    flat.pop("API Backend", None)
     flat = _flatten_stage_durations(flat)
     flat.pop("benchmark_params", None)
     flat.pop("server_params", None)
@@ -752,6 +756,7 @@ _OMNI_SUMMARY_WIDTHS = {
 _DIFFUSION_SUMMARY_WIDTHS = {
     "test_name": 30,
     "model": 15,
+    "endpoint": 24,
 }
 
 
