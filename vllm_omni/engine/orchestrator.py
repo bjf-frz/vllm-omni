@@ -632,7 +632,10 @@ class Orchestrator:
                 total_token=self._agg_total_tokens[stage_id],
                 total_gen_time_ms=self._agg_total_gen_time_ms[stage_id],
             ),
+            stage_submit_ts=submit_ts,
             stage_end_ts=now,
+            request_dispatch_wait_time_ms=float(getattr(req_state, "request_dispatch_wait_time_ms", 0.0)),
+            stage_latency_time_ms=stage_wall_time_ms,
         )
 
     def _build_kv_sender_info(self, sender_stage_ids: list[int]) -> dict[int, dict[str, Any]] | None:
@@ -937,6 +940,12 @@ class Orchestrator:
         )
         req_state.streaming.enabled = is_streaming
         req_state.stage_submit_ts[stage_id] = _time.time()
+        request_dispatch_start_ts = msg.get("request_dispatch_start_ts")
+        if request_dispatch_start_ts is not None:
+            req_state.request_dispatch_wait_time_ms = max(
+                0.0,
+                (req_state.stage_submit_ts[stage_id] - request_dispatch_start_ts) * 1000.0,
+            )
         self.request_states[request_id] = req_state
 
         # Stage-0 prompt is already a fully-formed OmniEngineCoreRequest

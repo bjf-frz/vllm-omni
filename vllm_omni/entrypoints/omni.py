@@ -148,6 +148,7 @@ class Omni(OmniBase):
                     prompt=prompt,
                     sampling_params_list=req_sp_list,
                     final_stage_id=final_stage_id,
+                    arrival_time=request_prep_start_ts,
                 )
                 submit_ts = time.time()
                 input_preprocess_time_ms[req_id] = (submit_ts - request_prep_start_ts) * 1000.0

@@ -1510,6 +1510,7 @@ class AsyncOmniEngine:
         )
         if self.request_queue is None:
             raise RuntimeError("request_queue is not initialized")
+        msg["request_dispatch_start_ts"] = time.time()
         self.request_queue.sync_q.put_nowait(msg)
 
         # CFG companion expansion: create and enqueue companion requests

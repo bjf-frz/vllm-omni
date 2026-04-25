@@ -44,7 +44,12 @@ class StageRequestStats:
     output_processor_time_ms: float = 0.0
     diffusion_metrics: dict[str, int] = None
     audio_generated_frames: int = 0
+    stage_submit_ts: float | None = None
     stage_end_ts: float | None = None
+    request_dispatch_wait_time_ms: float = 0.0
+    stage_latency_time_ms: float = 0.0
+    stage_queue_wait_time_ms: float = 0.0
+    stage_execution_time_ms: float = 0.0
     handoff_to_stage_id: int | None = None
     stage_handoff_time_ms: float = 0.0
     ar2diffusion_time_ms: float = 0.0
@@ -111,7 +116,12 @@ STAGE_EXCLUDE = {
     "rx_decode_time_ms",
     "rx_in_flight_time_ms",
     "final_output_type",
+    "stage_submit_ts",
     "stage_end_ts",
+    "request_dispatch_wait_time_ms",
+    "stage_latency_time_ms",
+    "stage_queue_wait_time_ms",
+    "stage_execution_time_ms",
     "handoff_to_stage_id",
     "stage_handoff_time_ms",
     "ar2diffusion_time_ms",
@@ -126,6 +136,9 @@ OVERALL_FIELDS: list[str] | None = [
     "input_preprocess_time_ms",
     "engine_pipeline_time_ms",
     "stage_gen_total_time_ms",
+    "stage_latency_total_time_ms",
+    "stage_queue_wait_total_time_ms",
+    "stage_execution_total_time_ms",
     "output_processor_total_time_ms",
     "stage_handoff_total_time_ms",
     "ar2diffusion_total_time_ms",
@@ -271,7 +284,8 @@ class OrchestratorAggregator:
             text = f"{value:,.3f}"
         else:
             text = str(value)
-        return f"{label:<42}{text:>16}"
+        label_width = max(42, len(label) + 1)
+        return f"{label:<{label_width}}{text:>16}"
 
     @staticmethod
     def _summary_header(title: str, char: str = "=") -> str:
@@ -311,7 +325,8 @@ class OrchestratorAggregator:
 
     def _request_stage_component_time_ms(self, request_id: str) -> float:
         return sum(
-            float(evt.stage_gen_time_ms or 0.0)
+            float(evt.stage_queue_wait_time_ms or 0.0)
+            + float(evt.stage_execution_time_ms or evt.stage_gen_time_ms or 0.0)
             + float(evt.output_processor_time_ms or 0.0)
             + float(evt.stage_handoff_time_ms or 0.0)
             for evt in self.stage_events.get(request_id, [])
@@ -325,8 +340,45 @@ class OrchestratorAggregator:
             - float(self.final_output_time_ms.get(evt.request_id, 0.0))
         )
 
+    def _request_dispatch_wait_time_ms(self, request_id: str) -> float:
+        return sum(
+            float(evt.request_dispatch_wait_time_ms or 0.0)
+            for evt in self.stage_events.get(request_id, [])
+            if evt.stage_id == 0
+        )
+
+    def _request_remaining_orchestration_time_ms(self, evt: RequestE2EStats) -> float:
+        return self._request_final_orchestration_time_ms(evt) - self._request_dispatch_wait_time_ms(evt.request_id)
+
     def _get_overall_summary_time_ms(self, overall_summary: dict[str, Any], key: str) -> float:
         return float(overall_summary.get(key, overall_summary.get(key.replace("_wall_", "_"), 0.0)))
+
+    def _estimate_stage_wait_and_execution_times(self) -> None:
+        for stage_id in range(self.num_stages):
+            stage_evts = sorted(
+                [
+                    evt
+                    for evts in self.stage_events.values()
+                    for evt in evts
+                    if evt.stage_id == stage_id and evt.stage_submit_ts is not None and evt.stage_end_ts is not None
+                ],
+                key=lambda evt: float(evt.stage_end_ts or 0.0),
+            )
+            previous_finish_ts: float | None = None
+            for evt in stage_evts:
+                submit_ts = float(evt.stage_submit_ts or 0.0)
+                end_ts = float(evt.stage_end_ts or submit_ts)
+                latency_ms = max(0.0, (end_ts - submit_ts) * 1000.0)
+                service_start_ts = submit_ts
+                if previous_finish_ts is not None:
+                    service_start_ts = max(submit_ts, previous_finish_ts)
+                queue_wait_ms = max(0.0, (service_start_ts - submit_ts) * 1000.0)
+                service_time_ms = max(0.0, (end_ts - service_start_ts) * 1000.0)
+                execution_ms = max(0.0, service_time_ms - float(evt.output_processor_time_ms or 0.0))
+                evt.stage_latency_time_ms = latency_ms
+                evt.stage_queue_wait_time_ms = queue_wait_ms
+                evt.stage_execution_time_ms = execution_ms
+                previous_finish_ts = end_ts if previous_finish_ts is None else max(previous_finish_ts, end_ts)
 
     def _build_omni_metrics_summary_lines(self, overall_summary: dict[str, Any]) -> list[str]:
         lines = [self._summary_header("Omni Metrics Summary")]
@@ -367,8 +419,20 @@ class OrchestratorAggregator:
             }
         )
         for stage_id in stage_ids:
-            stage_gen_ms = sum(
-                float(evt.stage_gen_time_ms or 0.0)
+            stage_latency_ms = sum(
+                float(evt.stage_latency_time_ms or evt.stage_gen_time_ms or 0.0)
+                for stage_evts in self.stage_events.values()
+                for evt in stage_evts
+                if evt.stage_id == stage_id
+            )
+            stage_queue_wait_ms = sum(
+                float(evt.stage_queue_wait_time_ms or 0.0)
+                for stage_evts in self.stage_events.values()
+                for evt in stage_evts
+                if evt.stage_id == stage_id
+            )
+            stage_execution_ms = sum(
+                float(evt.stage_execution_time_ms or evt.stage_gen_time_ms or 0.0)
                 for stage_evts in self.stage_events.values()
                 for evt in stage_evts
                 if evt.stage_id == stage_id
@@ -382,9 +446,11 @@ class OrchestratorAggregator:
             stage_event_count = sum(
                 1 for stage_evts in self.stage_events.values() for evt in stage_evts if evt.stage_id == stage_id
             )
-            lines.append(self._summary_line(f"Stage {stage_id} total generation time (ms):", stage_gen_ms))
+            lines.append(self._summary_line(f"Stage {stage_id} total latency time (ms):", stage_latency_ms))
+            lines.append(self._summary_line(f"Stage {stage_id} queue wait time (ms):", stage_queue_wait_ms))
+            lines.append(self._summary_line(f"Stage {stage_id} execution time (ms):", stage_execution_ms))
             lines.append(self._summary_line(f"Stage {stage_id} output processor time (ms):", output_processor_total_ms))
-            component_sum += stage_gen_ms + output_processor_total_ms
+            component_sum += stage_execution_ms + output_processor_total_ms
 
             handoff_ms = sum(
                 float(evt.stage_handoff_time_ms or 0.0)
@@ -408,8 +474,16 @@ class OrchestratorAggregator:
                 stage_average_lines.extend(
                     [
                         self._summary_line(
-                            f"Average Stage {stage_id} generation time (ms):",
-                            stage_gen_ms / stage_event_count,
+                            f"Average Stage {stage_id} latency time (ms):",
+                            stage_latency_ms / stage_event_count,
+                        ),
+                        self._summary_line(
+                            f"Average Stage {stage_id} queue wait time (ms):",
+                            stage_queue_wait_ms / stage_event_count,
+                        ),
+                        self._summary_line(
+                            f"Average Stage {stage_id} execution time (ms):",
+                            stage_execution_ms / stage_event_count,
                         ),
                         self._summary_line(
                             f"Average Stage {stage_id} output processor time (ms):",
@@ -444,12 +518,6 @@ class OrchestratorAggregator:
                 ]
             )
         else:
-            lines.append(
-                self._summary_line(
-                    "Component total work time (ms):",
-                    component_sum + final_output_bucket_ms,
-                )
-            )
             lines.extend(
                 [
                     "",
@@ -473,12 +541,14 @@ class OrchestratorAggregator:
             )
             e2e_evt = next((evt for evt in self.e2e_events if evt.request_id == rid), None)
             if e2e_evt is not None:
+                request_dispatch_wait_ms = self._request_dispatch_wait_time_ms(rid)
                 lines.extend(
                     [
                         "",
                         self._summary_header(f"Request {rid} Breakdown", "-"),
                         self._summary_line("Input preprocess time (ms):", e2e_evt.input_preprocess_time_ms),
                         self._summary_line("Input preprocess sum check (ms):", e2e_evt.input_preprocess_time_ms),
+                        self._summary_line("Request dispatch wait time (ms):", request_dispatch_wait_ms),
                     ]
                 )
             for evt in stage_evts:
@@ -487,14 +557,18 @@ class OrchestratorAggregator:
                     [
                         "",
                         self._summary_header(f"Stage {stage_id} Breakdown", "-"),
-                        self._summary_line("Stage generation time (ms):", float(evt.stage_gen_time_ms or 0.0)),
+                        self._summary_line(
+                            "Stage latency time (ms):",
+                            float(evt.stage_latency_time_ms or evt.stage_gen_time_ms or 0.0),
+                        ),
+                        self._summary_line("Queue wait time (ms):", float(evt.stage_queue_wait_time_ms or 0.0)),
+                        self._summary_line(
+                            "Execution time (ms):",
+                            float(evt.stage_execution_time_ms or evt.stage_gen_time_ms or 0.0),
+                        ),
                         self._summary_line(
                             "Output processor time (ms):",
                             float(evt.output_processor_time_ms or 0.0),
-                        ),
-                        self._summary_line(
-                            "Stage sum check (ms):",
-                            float(evt.stage_gen_time_ms or 0.0) + float(evt.output_processor_time_ms or 0.0),
                         ),
                         "",
                     ]
@@ -520,7 +594,9 @@ class OrchestratorAggregator:
                     )
 
             final_output_ms = float(self.final_output_time_ms.get(rid, 0.0))
-            final_orchestration_ms = self._request_final_orchestration_time_ms(e2e_evt) if e2e_evt is not None else 0.0
+            remaining_orchestration_ms = (
+                self._request_remaining_orchestration_time_ms(e2e_evt) if e2e_evt is not None else 0.0
+            )
             if final_output_ms != 0.0:
                 lines.extend(
                     [
@@ -531,8 +607,13 @@ class OrchestratorAggregator:
                         self._summary_line("Final output sum check (ms):", final_output_ms),
                     ]
                 )
-            if final_orchestration_ms != 0.0:
-                lines.append(self._summary_line("Unattributed request time (ms):", final_orchestration_ms))
+            if remaining_orchestration_ms != 0.0:
+                lines.append(
+                    self._summary_line(
+                        "Remaining orchestration overhead time (ms):",
+                        remaining_orchestration_ms,
+                    )
+                )
 
         return lines
 
@@ -719,6 +800,12 @@ class OrchestratorAggregator:
         stats.stage_name = self._get_stage_name(stage_id, stage_meta)
         stats.request_id = req_id
         stats.final_output_type = final_output_type
+        if stats.stage_latency_time_ms == 0.0:
+            stats.stage_latency_time_ms = (
+                float(stats.stage_end_ts - stats.stage_submit_ts) * 1000.0
+                if stats.stage_submit_ts is not None and stats.stage_end_ts is not None
+                else float(stats.stage_gen_time_ms or 0.0) + float(stats.output_processor_time_ms or 0.0)
+            )
         stats.diffusion_metrics = (
             {k: int(v) for k, v in self.diffusion_metrics.pop(req_id, {}).items()}
             if req_id in self.diffusion_metrics
@@ -895,6 +982,7 @@ class OrchestratorAggregator:
     def build_and_log_summary(self) -> dict[str, Any]:
         if not self.log_stats:
             return {}
+        self._estimate_stage_wait_and_execution_times()
         wall_time_ms = max(0.0, (self.last_finish_ts - self.wall_start_ts) * 1000.0)
         e2e_avg_req = (
             sum(float(evt.request_wall_time_ms) for evt in self.e2e_events) / self.e2e_count
@@ -926,6 +1014,9 @@ class OrchestratorAggregator:
             for i in range(self.num_stages)
         ]
         stage_gen_total_ms = 0.0
+        stage_latency_total_ms = 0.0
+        stage_queue_wait_total_ms = 0.0
+        stage_execution_total_ms = 0.0
         output_processor_total_ms = 0.0
         stage_handoff_total_ms = 0.0
         ar2diffusion_total_ms = 0.0
@@ -934,6 +1025,9 @@ class OrchestratorAggregator:
         for stage_evts in self.stage_events.values():
             for evt in stage_evts:
                 stage_gen_total_ms += float(evt.stage_gen_time_ms or 0.0)
+                stage_latency_total_ms += float(evt.stage_latency_time_ms or evt.stage_gen_time_ms or 0.0)
+                stage_queue_wait_total_ms += float(evt.stage_queue_wait_time_ms or 0.0)
+                stage_execution_total_ms += float(evt.stage_execution_time_ms or evt.stage_gen_time_ms or 0.0)
                 output_processor_total_ms += float(evt.output_processor_time_ms or 0.0)
                 handoff_ms = float(evt.stage_handoff_time_ms or 0.0)
                 ar2d_ms = float(evt.ar2diffusion_time_ms or 0.0)
@@ -952,6 +1046,9 @@ class OrchestratorAggregator:
             "input_preprocess_wall_time_ms": float(input_preprocess_wall_ms),
             "engine_pipeline_time_ms": float(engine_pipeline_wall_ms),
             "stage_gen_total_time_ms": float(stage_gen_total_ms),
+            "stage_latency_total_time_ms": float(stage_latency_total_ms),
+            "stage_queue_wait_total_time_ms": float(stage_queue_wait_total_ms),
+            "stage_execution_total_time_ms": float(stage_execution_total_ms),
             "output_processor_total_time_ms": float(output_processor_total_ms),
             "stage_handoff_total_time_ms": float(stage_handoff_total_ms),
             "ar2diffusion_total_time_ms": float(ar2diffusion_total_ms),

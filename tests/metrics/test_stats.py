@@ -264,12 +264,15 @@ def test_multi_request_summary_includes_averages_and_request_input_preprocess() 
     rendered = "\n".join(lines)
 
     assert "Sum check (ms):" in rendered
-    assert "Component total work time (ms):" in rendered
+    assert "Component total work time (ms):" not in rendered
     assert "Component sum (ms):" not in rendered
+    assert "Stage sum check (ms):" not in rendered
     assert "Average E2E time" not in rendered
     assert "Average engine pipeline time" not in rendered
     assert "Average Time Breakdown" in rendered
-    assert "Average Stage 0 generation time" in rendered
+    assert "Average Stage 0 latency time" in rendered
+    assert "Average Stage 0 queue wait time" in rendered
+    assert "Average Stage 0 execution time" in rendered
     assert "Request r1 Breakdown" in rendered
     assert "Request r2 Breakdown" in rendered
     assert "Input preprocess time (ms):" in rendered
