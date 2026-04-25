@@ -309,6 +309,25 @@ class OrchestratorAggregator:
             for key, value in sorted(evt.diffusion_metrics.items()):
                 lines.append(self._summary_line(f"{key}:", value))
 
+    def _request_stage_component_time_ms(self, request_id: str) -> float:
+        return sum(
+            float(evt.stage_gen_time_ms or 0.0)
+            + float(evt.output_processor_time_ms or 0.0)
+            + float(evt.stage_handoff_time_ms or 0.0)
+            for evt in self.stage_events.get(request_id, [])
+        )
+
+    def _request_final_orchestration_time_ms(self, evt: RequestE2EStats) -> float:
+        return (
+            float(evt.request_wall_time_ms)
+            - float(evt.input_preprocess_time_ms)
+            - self._request_stage_component_time_ms(evt.request_id)
+            - float(self.final_output_time_ms.get(evt.request_id, 0.0))
+        )
+
+    def _get_overall_summary_time_ms(self, overall_summary: dict[str, Any], key: str) -> float:
+        return float(overall_summary.get(key, overall_summary.get(key.replace("_wall_", "_"), 0.0)))
+
     def _build_omni_metrics_summary_lines(self, overall_summary: dict[str, Any]) -> list[str]:
         lines = [self._summary_header("Omni Metrics Summary")]
         lines.extend(
@@ -317,7 +336,7 @@ class OrchestratorAggregator:
                 self._summary_line("Total E2E time (ms):", float(overall_summary.get("request_wall_time_ms", 0.0))),
                 self._summary_line(
                     "Input preprocess time (ms):",
-                    float(overall_summary.get("input_preprocess_time_ms", 0.0)),
+                    self._get_overall_summary_time_ms(overall_summary, "input_preprocess_wall_time_ms"),
                 ),
                 self._summary_line(
                     "Engine pipeline time (ms):",
@@ -325,19 +344,20 @@ class OrchestratorAggregator:
                 ),
                 self._summary_line(
                     "Sum check (ms):",
-                    float(overall_summary.get("input_preprocess_time_ms", 0.0))
+                    self._get_overall_summary_time_ms(overall_summary, "input_preprocess_wall_time_ms")
                     + float(overall_summary.get("engine_pipeline_time_ms", 0.0)),
                 ),
                 "",
                 self._summary_header("Overall Time Breakdown", "-"),
                 self._summary_line(
                     "Input preprocess time (ms):",
-                    float(overall_summary.get("input_preprocess_time_ms", 0.0)),
+                    self._get_overall_summary_time_ms(overall_summary, "input_preprocess_wall_time_ms"),
                 ),
             ]
         )
 
-        component_sum = float(overall_summary.get("input_preprocess_time_ms", 0.0))
+        component_sum = self._get_overall_summary_time_ms(overall_summary, "input_preprocess_wall_time_ms")
+        stage_average_lines: list[str] = []
         stage_ids = sorted(
             {
                 evt.stage_id
@@ -353,15 +373,18 @@ class OrchestratorAggregator:
                 for evt in stage_evts
                 if evt.stage_id == stage_id
             )
-            output_processor_ms = sum(
+            output_processor_total_ms = sum(
                 float(evt.output_processor_time_ms or 0.0)
                 for stage_evts in self.stage_events.values()
                 for evt in stage_evts
                 if evt.stage_id == stage_id
             )
-            lines.append(self._summary_line(f"Stage {stage_id} generation time (ms):", stage_gen_ms))
-            lines.append(self._summary_line(f"Stage {stage_id} output processor time (ms):", output_processor_ms))
-            component_sum += stage_gen_ms + output_processor_ms
+            stage_event_count = sum(
+                1 for stage_evts in self.stage_events.values() for evt in stage_evts if evt.stage_id == stage_id
+            )
+            lines.append(self._summary_line(f"Stage {stage_id} total generation time (ms):", stage_gen_ms))
+            lines.append(self._summary_line(f"Stage {stage_id} output processor time (ms):", output_processor_total_ms))
+            component_sum += stage_gen_ms + output_processor_total_ms
 
             handoff_ms = sum(
                 float(evt.stage_handoff_time_ms or 0.0)
@@ -381,26 +404,83 @@ class OrchestratorAggregator:
                 to_stage = to_stage_ids[0] if len(to_stage_ids) == 1 else "next"
                 lines.append(self._summary_line(f"Stage {stage_id} -> Stage {to_stage} handoff time (ms):", handoff_ms))
                 component_sum += handoff_ms
+            if int(overall_summary.get("num_of_requests", 0)) > 1 and stage_event_count > 0:
+                stage_average_lines.extend(
+                    [
+                        self._summary_line(
+                            f"Average Stage {stage_id} generation time (ms):",
+                            stage_gen_ms / stage_event_count,
+                        ),
+                        self._summary_line(
+                            f"Average Stage {stage_id} output processor time (ms):",
+                            output_processor_total_ms / stage_event_count,
+                        ),
+                    ]
+                )
+                if handoff_ms > 0.0:
+                    stage_average_lines.append(
+                        self._summary_line(
+                            f"Average Stage {stage_id} handoff time (ms):",
+                            handoff_ms / stage_event_count,
+                        )
+                    )
 
-        final_output_ms = float(overall_summary.get("final_output_total_time_ms", 0.0))
-        final_orchestration_ms = float(overall_summary.get("breakdown_delta_time_ms", 0.0))
-        final_output_bucket_ms = final_output_ms + final_orchestration_ms
+        final_output_bucket_ms = float(overall_summary.get("final_output_total_time_ms", 0.0))
         lines.extend(
             [
                 self._summary_line("Final output time (ms):", final_output_bucket_ms),
-                self._summary_line("Component sum (ms):", component_sum + final_output_bucket_ms),
-                self._summary_line(
-                    "E2E - component sum (ms):",
-                    float(overall_summary.get("request_wall_time_ms", 0.0)) - component_sum - final_output_bucket_ms,
-                ),
             ]
         )
+        if int(overall_summary.get("num_of_requests", 0)) == 1:
+            lines.extend(
+                [
+                    self._summary_line("Component sum (ms):", component_sum + final_output_bucket_ms),
+                    self._summary_line(
+                        "E2E - component sum (ms):",
+                        float(overall_summary.get("request_wall_time_ms", 0.0))
+                        - component_sum
+                        - final_output_bucket_ms,
+                    ),
+                ]
+            )
+        else:
+            lines.append(
+                self._summary_line(
+                    "Component total work time (ms):",
+                    component_sum + final_output_bucket_ms,
+                )
+            )
+            lines.extend(
+                [
+                    "",
+                    self._summary_header("Average Time Breakdown", "-"),
+                    self._summary_line(
+                        "Average input preprocess time (ms):",
+                        float(overall_summary.get("avg_input_preprocess_time_ms", 0.0)),
+                    ),
+                    *stage_average_lines,
+                    self._summary_line(
+                        "Average final output time (ms):",
+                        float(overall_summary.get("avg_final_output_time_ms", 0.0)),
+                    ),
+                ]
+            )
 
         for rid in sorted(set(self.stage_events.keys()) | {evt.request_id for evt in self.e2e_events}):
             stage_evts = sorted(
                 self.stage_events.get(rid, []),
                 key=lambda evt: evt.stage_id if evt.stage_id is not None else -1,
             )
+            e2e_evt = next((evt for evt in self.e2e_events if evt.request_id == rid), None)
+            if e2e_evt is not None:
+                lines.extend(
+                    [
+                        "",
+                        self._summary_header(f"Request {rid} Breakdown", "-"),
+                        self._summary_line("Input preprocess time (ms):", e2e_evt.input_preprocess_time_ms),
+                        self._summary_line("Input preprocess sum check (ms):", e2e_evt.input_preprocess_time_ms),
+                    ]
+                )
             for evt in stage_evts:
                 stage_id = evt.stage_id if evt.stage_id is not None else "unknown"
                 lines.extend(
@@ -440,34 +520,19 @@ class OrchestratorAggregator:
                     )
 
             final_output_ms = float(self.final_output_time_ms.get(rid, 0.0))
-            e2e_evt = next((evt for evt in self.e2e_events if evt.request_id == rid), None)
-            if e2e_evt is None:
-                final_orchestration_ms = 0.0
-            else:
-                stage_component_ms = sum(
-                    float(evt.stage_gen_time_ms or 0.0)
-                    + float(evt.output_processor_time_ms or 0.0)
-                    + float(evt.stage_handoff_time_ms or 0.0)
-                    for evt in stage_evts
-                )
-                final_orchestration_ms = (
-                    float(e2e_evt.request_wall_time_ms)
-                    - float(e2e_evt.input_preprocess_time_ms)
-                    - stage_component_ms
-                    - final_output_ms
-                )
-            final_output_bucket_ms = final_output_ms + final_orchestration_ms
-            if final_output_bucket_ms != 0.0:
+            final_orchestration_ms = self._request_final_orchestration_time_ms(e2e_evt) if e2e_evt is not None else 0.0
+            if final_output_ms != 0.0:
                 lines.extend(
                     [
                         "",
                         self._summary_header("Final Output Breakdown", "-"),
                         self._summary_line("Final output wrapping time (ms):", final_output_ms),
-                        self._summary_line("Final orchestration overhead time (ms):", final_orchestration_ms),
-                        self._summary_line("Final output total time (ms):", final_output_bucket_ms),
-                        self._summary_line("Final output sum check (ms):", final_output_bucket_ms),
+                        self._summary_line("Final output total time (ms):", final_output_ms),
+                        self._summary_line("Final output sum check (ms):", final_output_ms),
                     ]
                 )
+            if final_orchestration_ms != 0.0:
+                lines.append(self._summary_line("Unattributed request time (ms):", final_orchestration_ms))
 
         return lines
 
@@ -697,7 +762,14 @@ class OrchestratorAggregator:
     def record_ar2diffusion_time(self, stage_id: int, req_id: Any, ar2diffusion_time_ms: float) -> None:
         self._update_stage_event_field(stage_id, req_id, "ar2diffusion_time_ms", ar2diffusion_time_ms)
 
-    def record_final_output_time(self, req_id: Any, final_output_time_ms: float) -> None:
+    def record_final_output_time(
+        self,
+        req_id: Any,
+        final_output_time_ms: float,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ) -> None:
+        del start_ts, end_ts
         self.final_output_time_ms[str(req_id)] += float(final_output_time_ms)
 
     def record_stage_handoff_time(
@@ -824,8 +896,23 @@ class OrchestratorAggregator:
         if not self.log_stats:
             return {}
         wall_time_ms = max(0.0, (self.last_finish_ts - self.wall_start_ts) * 1000.0)
-        e2e_avg_req = (wall_time_ms / self.e2e_count) if self.e2e_count > 0 else 0.0
+        e2e_avg_req = (
+            sum(float(evt.request_wall_time_ms) for evt in self.e2e_events) / self.e2e_count
+            if self.e2e_count > 0
+            else 0.0
+        )
         avg_tok = (self.total_tokens * 1000.0 / wall_time_ms) if wall_time_ms > 0 else 0.0
+        first_engine_ts = min((ts for ts in self.stage_first_ts if ts is not None), default=None)
+        engine_pipeline_wall_ms = (
+            max(0.0, (self.last_finish_ts - first_engine_ts) * 1000.0)
+            if first_engine_ts is not None
+            else float(self.engine_pipeline_total_ms)
+        )
+        input_preprocess_wall_ms = (
+            max(0.0, (first_engine_ts - self.wall_start_ts) * 1000.0)
+            if first_engine_ts is not None
+            else float(self.input_preprocess_total_ms)
+        )
 
         if isinstance(self.final_stage_id_for_e2e, int):
             final_stage_id_map: dict[str, int] = {"*": int(self.final_stage_id_for_e2e)}
@@ -856,20 +943,14 @@ class OrchestratorAggregator:
                     edge = f"stage_{evt.stage_id}_to_{evt.handoff_to_stage_id}"
                     handoff_edge_totals[edge] += handoff_ms
                     handoff_edge_ar2diffusion[edge] += ar2d_ms
-        breakdown_delta_ms = (
-            float(wall_time_ms)
-            - float(self.input_preprocess_total_ms)
-            - stage_gen_total_ms
-            - output_processor_total_ms
-            - stage_handoff_total_ms
-            - float(self.final_output_total_ms)
-        )
+        breakdown_delta_ms = sum(self._request_final_orchestration_time_ms(evt) for evt in self.e2e_events)
 
         overall_summary = {
             "num_of_requests": int(self.e2e_count),
             "request_wall_time_ms": float(wall_time_ms),
             "input_preprocess_time_ms": float(self.input_preprocess_total_ms),
-            "engine_pipeline_time_ms": float(self.engine_pipeline_total_ms),
+            "input_preprocess_wall_time_ms": float(input_preprocess_wall_ms),
+            "engine_pipeline_time_ms": float(engine_pipeline_wall_ms),
             "stage_gen_total_time_ms": float(stage_gen_total_ms),
             "output_processor_total_time_ms": float(output_processor_total_ms),
             "stage_handoff_total_time_ms": float(stage_handoff_total_ms),

@@ -396,6 +396,7 @@ class OmniBase(PDDisaggregationMixin):
         if not stage_meta["final_output"]:
             return None
 
+        final_output_start_ts = time.time()
         final_output_start = time.perf_counter()
         images = getattr(engine_outputs, "images", []) if stage_meta["final_output_type"] == "image" else []
         output_to_yield = OmniRequestOutput(
@@ -412,7 +413,8 @@ class OmniBase(PDDisaggregationMixin):
             stage_durations=stage_durations,
             peak_memory_mb=peak_memory_mb,
         )
-        metrics.record_final_output_time(req_id, (time.perf_counter() - final_output_start) * 1000.0)
+        final_output_time_ms = (time.perf_counter() - final_output_start) * 1000.0
+        metrics.record_final_output_time(req_id, final_output_time_ms, final_output_start_ts, time.time())
 
         try:
             rid_key = str(req_id)

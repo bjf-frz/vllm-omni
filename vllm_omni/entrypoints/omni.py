@@ -117,22 +117,23 @@ class Omni(OmniBase):
             input_preprocess_time_ms: dict[str, float] = {}
             wall_start_ts = time.time()
             req_final_stage_ids: dict[str, int] = {}
+            for req_id, prompt in zip(request_ids, request_prompts):
+                prompt_modalities = prompt.get("modalities", None) if isinstance(prompt, dict) else None
+                req_final_stage_ids[req_id] = self._compute_final_stage_id(prompt_modalities)
+            batch_metrics = OrchestratorMetrics(
+                self.num_stages,
+                self.log_stats,
+                wall_start_ts,
+                req_final_stage_ids,
+                stage_metadata=getattr(self.engine, "stage_metadata", None),
+            )
 
             for req_id, prompt in zip(request_ids, request_prompts):
                 request_prep_start_ts = time.time()
-                prompt_modalities = prompt.get("modalities", None) if isinstance(prompt, dict) else None
-                final_stage_id = self._compute_final_stage_id(prompt_modalities)
-                req_final_stage_ids[req_id] = final_stage_id
+                final_stage_id = req_final_stage_ids[req_id]
 
-                metrics = OrchestratorMetrics(
-                    self.num_stages,
-                    self.log_stats,
-                    wall_start_ts,
-                    final_stage_id,
-                    stage_metadata=getattr(self.engine, "stage_metadata", None),
-                )
                 req_state = ClientRequestState(req_id)
-                req_state.metrics = metrics
+                req_state.metrics = batch_metrics
                 self.request_states[req_id] = req_state
 
                 # PD disaggregation: modify stage-0 (prefill) sampling params per request
@@ -150,7 +151,10 @@ class Omni(OmniBase):
                 )
                 submit_ts = time.time()
                 input_preprocess_time_ms[req_id] = (submit_ts - request_prep_start_ts) * 1000.0
-                req_state.metrics.stage_first_ts[0] = submit_ts
+                if batch_metrics.stage_first_ts[0] is None:
+                    batch_metrics.stage_first_ts[0] = submit_ts
+                else:
+                    batch_metrics.stage_first_ts[0] = min(batch_metrics.stage_first_ts[0], submit_ts)
                 req_start_ts[req_id] = submit_ts
 
             active_reqs = set(request_ids)
@@ -190,7 +194,11 @@ class Omni(OmniBase):
                     active_reqs.discard(req_id)
                     if pbar is not None:
                         pbar.update(1)
-                    self._log_summary_and_cleanup(req_id)
+                    self.request_states.pop(req_id, None)
+
+            summary = batch_metrics.build_and_log_summary()
+            if summary:
+                logger.debug("[Summary] %s", summary)
         except Exception:
             if "active_reqs" in locals() and active_reqs:
                 self.abort(list(active_reqs))

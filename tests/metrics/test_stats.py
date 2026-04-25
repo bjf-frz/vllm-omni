@@ -178,3 +178,98 @@ def test_build_and_log_summary_multiple_requests() -> None:
     r2_stage_entry = next(e for e in summary["stage_table"] if e["request_id"] == "r2")
     assert len(r1_stage_entry["stages"]) == 2
     assert len(r2_stage_entry["stages"]) == 1
+
+
+def test_overall_engine_pipeline_time_uses_batch_wall_time() -> None:
+    agg = OrchestratorAggregator(num_stages=1, log_stats=True, wall_start_ts=0.0, final_stage_id_for_e2e=0)
+    agg.stage_first_ts[0] = 1.0
+    agg.last_finish_ts = 251.0
+    agg.engine_pipeline_total_ms = 1_336_711.0
+    agg.e2e_count = 10
+    agg.e2e_events = [
+        RequestE2EStats(
+            request_id=f"r{i}",
+            request_wall_time_ms=250_000.0,
+            input_preprocess_time_ms=1.0,
+            engine_pipeline_time_ms=249_999.0,
+            total_tokens=0,
+            transfers_total_time_ms=0.0,
+            transfers_total_bytes=0,
+        )
+        for i in range(10)
+    ]
+
+    summary = agg.build_and_log_summary()
+
+    assert summary["overall_summary"]["request_wall_time_ms"] == 251_000.0
+    assert summary["overall_summary"]["input_preprocess_wall_time_ms"] == 1_000.0
+    assert summary["overall_summary"]["engine_pipeline_time_ms"] == 250_000.0
+    assert summary["overall_summary"]["avg_engine_pipeline_time_ms"] == 249_999.0
+
+
+def test_multi_request_summary_includes_averages_and_request_input_preprocess() -> None:
+    agg = OrchestratorAggregator(
+        num_stages=1,
+        log_stats=True,
+        wall_start_ts=0.0,
+        final_stage_id_for_e2e={"r1": 0, "r2": 0},
+    )
+    for req_id in ("r1", "r2"):
+        agg.on_stage_metrics(
+            0,
+            req_id,
+            StageRequestStats(
+                batch_id=1,
+                batch_size=2,
+                num_tokens_in=1,
+                num_tokens_out=2,
+                stage_gen_time_ms=10.0,
+                rx_transfer_bytes=0,
+                rx_decode_time_ms=0.0,
+                rx_in_flight_time_ms=0.0,
+                stage_stats=StageStats(),
+            ),
+        )
+        agg.e2e_events.append(
+            RequestE2EStats(
+                request_id=req_id,
+                request_wall_time_ms=20.0,
+                input_preprocess_time_ms=2.0,
+                engine_pipeline_time_ms=18.0,
+                total_tokens=3,
+                transfers_total_time_ms=0.0,
+                transfers_total_bytes=0,
+            )
+        )
+    agg.e2e_count = 2
+    agg.input_preprocess_total_ms = 4.0
+
+    lines = agg._build_omni_metrics_summary_lines(
+        {
+            "num_of_requests": 2,
+            "request_wall_time_ms": 20.0,
+            "input_preprocess_time_ms": 4.0,
+            "input_preprocess_wall_time_ms": 2.0,
+            "engine_pipeline_time_ms": 18.0,
+            "final_output_total_time_ms": 0.0,
+            "breakdown_delta_time_ms": 12.0,
+            "avg_request_wall_time_ms": 20.0,
+            "avg_engine_pipeline_time_ms": 18.0,
+            "avg_input_preprocess_time_ms": 2.0,
+            "avg_final_output_time_ms": 0.0,
+            "avg_breakdown_delta_time_ms": 6.0,
+            "stage_0_wall_time_ms": 12.0,
+        }
+    )
+    rendered = "\n".join(lines)
+
+    assert "Sum check (ms):" in rendered
+    assert "Component total work time (ms):" in rendered
+    assert "Component sum (ms):" not in rendered
+    assert "Average E2E time" not in rendered
+    assert "Average engine pipeline time" not in rendered
+    assert "Average Time Breakdown" in rendered
+    assert "Average Stage 0 generation time" in rendered
+    assert "Request r1 Breakdown" in rendered
+    assert "Request r2 Breakdown" in rendered
+    assert "Input preprocess time (ms):" in rendered

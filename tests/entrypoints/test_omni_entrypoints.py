@@ -645,6 +645,77 @@ def test_omni_generate_returns_list_when_not_using_generator(monkeypatch: pytest
     assert [output.stage_id for output in outputs] == [0, 2, 0, 2]
 
 
+def test_omni_generate_batches_offline_metrics_summary(monkeypatch: pytest.MonkeyPatch):
+    class FakeMetrics:
+        instances: list[FakeMetrics] = []
+
+        def __init__(
+            self,
+            num_stages: int,
+            log_stats: bool,
+            wall_start_ts: float,
+            final_stage_id_for_e2e: dict[str, int],
+            **_: Any,
+        ) -> None:
+            self.num_stages = num_stages
+            self.log_stats = log_stats
+            self.wall_start_ts = wall_start_ts
+            self.final_stage_id_for_e2e = final_stage_id_for_e2e
+            self.stage_first_ts = [None] * num_stages
+            self.stage_last_ts = [None] * num_stages
+            self.e2e_done: set[str] = set()
+            self.final_output_time_ms: dict[str, float] = {}
+            self.build_count = 0
+            FakeMetrics.instances.append(self)
+
+        def on_stage_metrics(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def record_final_output_time(self, req_id: str, final_output_time_ms: float) -> None:
+            self.final_output_time_ms[req_id] = final_output_time_ms
+
+        def on_finalize_request(
+            self,
+            stage_id: int,
+            req_id: str,
+            req_start_ts: float,
+            input_preprocess_time_ms: float = 0.0,
+        ) -> None:
+            del stage_id, req_start_ts, input_preprocess_time_ms
+            self.e2e_done.add(req_id)
+
+        def build_and_log_summary(self) -> dict[str, Any]:
+            self.build_count += 1
+            return {"num_requests": len(self.e2e_done)}
+
+    sampling_params = [SamplingParams(max_tokens=8) for _ in range(2)]
+    engine = FakeAsyncOmniEngine(
+        stage_metadata=LLM_DIFFUSION_META,
+        default_sampling_params_list=sampling_params,
+        on_add_request=_enqueue_omni_llm_diffusion_outputs,
+    )
+    _patch_engine(monkeypatch, engine)
+    monkeypatch.setattr("vllm_omni.entrypoints.omni.OrchestratorMetrics", FakeMetrics)
+
+    app = Omni("dummy-model", log_stats=True)
+    try:
+        outputs = list(app.generate(["p1", "p2"], py_generator=True, use_tqdm=False))
+    finally:
+        if not engine.shutdown_called:
+            app.shutdown()
+
+    assert len(outputs) == 4
+    assert len(FakeMetrics.instances) == 1
+    metrics = FakeMetrics.instances[0]
+    assert metrics.final_stage_id_for_e2e == {
+        engine.submitted[0]["request_id"]: 1,
+        engine.submitted[1]["request_id"]: 1,
+    }
+    assert metrics.e2e_done == {engine.submitted[0]["request_id"], engine.submitted[1]["request_id"]}
+    assert metrics.build_count == 1
+    assert app.request_states == {}
+
+
 def test_omni_generate_diffusion_only_yields_single_image_per_request(monkeypatch: pytest.MonkeyPatch):
     sampling_params = [SamplingParams(max_tokens=8)]
     engine = FakeAsyncOmniEngine(
