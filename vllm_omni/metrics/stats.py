@@ -991,6 +991,11 @@ class OrchestratorAggregator:
             if self.e2e_count > 0
             else 0.0
         )
+        avg_engine_pipeline_ms = (
+            sum(float(evt.engine_pipeline_time_ms) for evt in self.e2e_events) / self.e2e_count
+            if self.e2e_count > 0
+            else 0.0
+        )
         avg_tok = (self.total_tokens * 1000.0 / wall_time_ms) if wall_time_ms > 0 else 0.0
         first_engine_ts = min((ts for ts in self.stage_first_ts if ts is not None), default=None)
         engine_pipeline_wall_ms = (
@@ -1061,9 +1066,7 @@ class OrchestratorAggregator:
             "avg_input_preprocess_time_ms": float(
                 self.input_preprocess_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
             ),
-            "avg_engine_pipeline_time_ms": float(
-                self.engine_pipeline_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
-            ),
+            "avg_engine_pipeline_time_ms": float(avg_engine_pipeline_ms),
             "avg_stage_gen_total_time_ms": float(stage_gen_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0),
             "avg_output_processor_time_ms": float(
                 output_processor_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0

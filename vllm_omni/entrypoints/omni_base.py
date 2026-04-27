@@ -388,8 +388,9 @@ class OmniBase(PDDisaggregationMixin):
         peak_memory_mb = getattr(result["engine_outputs"], "peak_memory_mb", 0.0)
 
         # Merge AR stage timing from OrchestratorAggregator.stage_events
+        stage_events = getattr(metrics, "stage_events", {})
         if self._enable_ar_profiler:
-            ar_events = metrics.stage_events.get(str(req_id), [])
+            ar_events = stage_events.get(str(req_id), [])
             for evt in ar_events:
                 if evt.stage_id != stage_id:
                     stage_durations[f"ar_stage_{evt.stage_id}"] = evt.stage_gen_time_ms / 1000.0
@@ -402,7 +403,7 @@ class OmniBase(PDDisaggregationMixin):
                     stage_durations[key] = value
 
         # Merge per-stage gen times into stage_durations
-        for evt in metrics.stage_events.get(str(req_id), []):
+        for evt in stage_events.get(str(req_id), []):
             key = f"stage_{evt.stage_id}_gen_ms"
             if key not in stage_durations:
                 stage_durations[key] = evt.stage_gen_time_ms
