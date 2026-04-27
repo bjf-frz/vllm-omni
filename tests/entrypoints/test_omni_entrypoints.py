@@ -671,7 +671,14 @@ def test_omni_generate_batches_offline_metrics_summary(monkeypatch: pytest.Monke
         def on_stage_metrics(self, *_: Any, **__: Any) -> None:
             pass
 
-        def record_final_output_time(self, req_id: str, final_output_time_ms: float) -> None:
+        def record_final_output_time(
+            self,
+            req_id: str,
+            final_output_time_ms: float,
+            start_ts: float | None = None,
+            end_ts: float | None = None,
+        ) -> None:
+            del start_ts, end_ts
             self.final_output_time_ms[req_id] = final_output_time_ms
 
         def on_finalize_request(

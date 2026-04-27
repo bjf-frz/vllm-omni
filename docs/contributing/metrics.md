@@ -140,6 +140,12 @@ Any remaining difference is reported as `breakdown_delta_time_ms`.
 
 `ar2diffusion_total_time_ms` is included in `stage_handoff_total_time_ms`. For a concrete AR-to-diffusion edge, `stage_0_to_1_ar2diffusion_time_ms` is included in `stage_0_to_1_handoff_time_ms`.
 
+For offline batches, average component fields such as `avg_stage_gen_total_time_ms`,
+`avg_output_processor_time_ms`, `avg_stage_handoff_total_time_ms`, and
+`avg_ar2diffusion_time_ms` are computed by dividing the batch aggregate by
+`num_of_requests`. They are not individually timed per request and then averaged.
+Per-request timers remain available in the E2E table where they are measured directly.
+
 ---
 
 ### E2E Table (per request)

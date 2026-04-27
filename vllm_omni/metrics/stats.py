@@ -47,9 +47,9 @@ class StageRequestStats:
     stage_submit_ts: float | None = None
     stage_end_ts: float | None = None
     request_dispatch_wait_time_ms: float = 0.0
-    stage_latency_time_ms: float = 0.0
-    stage_queue_wait_time_ms: float = 0.0
-    stage_execution_time_ms: float = 0.0
+    stage_latency_time_ms: float | None = None
+    stage_queue_wait_time_ms: float | None = None
+    stage_execution_time_ms: float | None = None
     handoff_to_stage_id: int | None = None
     stage_handoff_time_ms: float = 0.0
     ar2diffusion_time_ms: float = 0.0
@@ -327,8 +327,8 @@ class OrchestratorAggregator:
 
     def _request_stage_component_time_ms(self, request_id: str) -> float:
         return sum(
-            float(evt.stage_queue_wait_time_ms or 0.0)
-            + float(evt.stage_execution_time_ms or evt.stage_gen_time_ms or 0.0)
+            self._optional_ms(evt.stage_queue_wait_time_ms)
+            + self._stage_execution_ms(evt)
             + float(evt.output_processor_time_ms or 0.0)
             + float(evt.stage_handoff_time_ms or 0.0)
             for evt in self.stage_events.get(request_id, [])
@@ -355,7 +355,29 @@ class OrchestratorAggregator:
     def _get_overall_summary_time_ms(self, overall_summary: dict[str, Any], key: str) -> float:
         return float(overall_summary.get(key, overall_summary.get(key.replace("_wall_", "_"), 0.0)))
 
+    @staticmethod
+    def _optional_ms(value: float | None, default: float = 0.0) -> float:
+        return float(default if value is None else value)
+
+    @classmethod
+    def _stage_latency_ms(cls, evt: StageRequestStats) -> float:
+        return cls._optional_ms(evt.stage_latency_time_ms, float(evt.stage_gen_time_ms or 0.0))
+
+    @classmethod
+    def _stage_execution_ms(cls, evt: StageRequestStats) -> float:
+        return cls._optional_ms(evt.stage_execution_time_ms, float(evt.stage_gen_time_ms or 0.0))
+
+    @staticmethod
+    def _average(total: float, count: int) -> float:
+        return float(total / count) if count > 0 else 0.0
+
+    def _average_e2e_field(self, field_name: str) -> float:
+        if self.e2e_count <= 0:
+            return 0.0
+        return float(sum(float(getattr(evt, field_name)) for evt in self.e2e_events) / self.e2e_count)
+
     def _estimate_stage_wait_and_execution_times(self) -> None:
+        """Populate derived latency, queue wait, and execution times on stage events."""
         for stage_id in range(self.num_stages):
             stage_evts = sorted(
                 [
@@ -422,19 +444,19 @@ class OrchestratorAggregator:
         )
         for stage_id in stage_ids:
             stage_latency_ms = sum(
-                float(evt.stage_latency_time_ms or evt.stage_gen_time_ms or 0.0)
+                self._stage_latency_ms(evt)
                 for stage_evts in self.stage_events.values()
                 for evt in stage_evts
                 if evt.stage_id == stage_id
             )
             stage_queue_wait_ms = sum(
-                float(evt.stage_queue_wait_time_ms or 0.0)
+                self._optional_ms(evt.stage_queue_wait_time_ms)
                 for stage_evts in self.stage_events.values()
                 for evt in stage_evts
                 if evt.stage_id == stage_id
             )
             stage_execution_ms = sum(
-                float(evt.stage_execution_time_ms or evt.stage_gen_time_ms or 0.0)
+                self._stage_execution_ms(evt)
                 for stage_evts in self.stage_events.values()
                 for evt in stage_evts
                 if evt.stage_id == stage_id
@@ -561,12 +583,12 @@ class OrchestratorAggregator:
                         self._summary_header(f"Stage {stage_id} Breakdown", "-"),
                         self._summary_line(
                             "Stage latency time (ms):",
-                            float(evt.stage_latency_time_ms or evt.stage_gen_time_ms or 0.0),
+                            self._stage_latency_ms(evt),
                         ),
-                        self._summary_line("Queue wait time (ms):", float(evt.stage_queue_wait_time_ms or 0.0)),
+                        self._summary_line("Queue wait time (ms):", self._optional_ms(evt.stage_queue_wait_time_ms)),
                         self._summary_line(
                             "Execution time (ms):",
-                            float(evt.stage_execution_time_ms or evt.stage_gen_time_ms or 0.0),
+                            self._stage_execution_ms(evt),
                         ),
                         self._summary_line(
                             "Output processor time (ms):",
@@ -802,7 +824,7 @@ class OrchestratorAggregator:
         stats.stage_name = self._get_stage_name(stage_id, stage_meta)
         stats.request_id = req_id
         stats.final_output_type = final_output_type
-        if stats.stage_latency_time_ms == 0.0:
+        if stats.stage_latency_time_ms is None:
             stats.stage_latency_time_ms = (
                 float(stats.stage_end_ts - stats.stage_submit_ts) * 1000.0
                 if stats.stage_submit_ts is not None and stats.stage_end_ts is not None
@@ -986,16 +1008,8 @@ class OrchestratorAggregator:
             return {}
         self._estimate_stage_wait_and_execution_times()
         wall_time_ms = max(0.0, (self.last_finish_ts - self.wall_start_ts) * 1000.0)
-        e2e_avg_req = (
-            sum(float(evt.request_wall_time_ms) for evt in self.e2e_events) / self.e2e_count
-            if self.e2e_count > 0
-            else 0.0
-        )
-        avg_engine_pipeline_ms = (
-            sum(float(evt.engine_pipeline_time_ms) for evt in self.e2e_events) / self.e2e_count
-            if self.e2e_count > 0
-            else 0.0
-        )
+        e2e_avg_req = self._average_e2e_field("request_wall_time_ms")
+        avg_engine_pipeline_ms = self._average_e2e_field("engine_pipeline_time_ms")
         avg_tok = (self.total_tokens * 1000.0 / wall_time_ms) if wall_time_ms > 0 else 0.0
         first_engine_ts = min((ts for ts in self.stage_first_ts if ts is not None), default=None)
         engine_pipeline_wall_ms = (
@@ -1032,9 +1046,9 @@ class OrchestratorAggregator:
         for stage_evts in self.stage_events.values():
             for evt in stage_evts:
                 stage_gen_total_ms += float(evt.stage_gen_time_ms or 0.0)
-                stage_latency_total_ms += float(evt.stage_latency_time_ms or evt.stage_gen_time_ms or 0.0)
-                stage_queue_wait_total_ms += float(evt.stage_queue_wait_time_ms or 0.0)
-                stage_execution_total_ms += float(evt.stage_execution_time_ms or evt.stage_gen_time_ms or 0.0)
+                stage_latency_total_ms += self._stage_latency_ms(evt)
+                stage_queue_wait_total_ms += self._optional_ms(evt.stage_queue_wait_time_ms)
+                stage_execution_total_ms += self._stage_execution_ms(evt)
                 output_processor_total_ms += float(evt.output_processor_time_ms or 0.0)
                 handoff_ms = float(evt.stage_handoff_time_ms or 0.0)
                 ar2d_ms = float(evt.ar2diffusion_time_ms or 0.0)
@@ -1063,22 +1077,14 @@ class OrchestratorAggregator:
             "breakdown_delta_time_ms": float(breakdown_delta_ms),
             "total_tokens": int(self.total_tokens),
             "avg_request_wall_time_ms": float(e2e_avg_req),
-            "avg_input_preprocess_time_ms": float(
-                self.input_preprocess_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
-            ),
+            "avg_input_preprocess_time_ms": self._average(self.input_preprocess_total_ms, self.e2e_count),
             "avg_engine_pipeline_time_ms": float(avg_engine_pipeline_ms),
-            "avg_stage_gen_total_time_ms": float(stage_gen_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0),
-            "avg_output_processor_time_ms": float(
-                output_processor_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
-            ),
-            "avg_stage_handoff_total_time_ms": float(
-                stage_handoff_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
-            ),
-            "avg_ar2diffusion_time_ms": float(ar2diffusion_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0),
-            "avg_final_output_time_ms": float(
-                self.final_output_total_ms / self.e2e_count if self.e2e_count > 0 else 0.0
-            ),
-            "avg_breakdown_delta_time_ms": float(breakdown_delta_ms / self.e2e_count if self.e2e_count > 0 else 0.0),
+            "avg_stage_gen_total_time_ms": self._average(stage_gen_total_ms, self.e2e_count),
+            "avg_output_processor_time_ms": self._average(output_processor_total_ms, self.e2e_count),
+            "avg_stage_handoff_total_time_ms": self._average(stage_handoff_total_ms, self.e2e_count),
+            "avg_ar2diffusion_time_ms": self._average(ar2diffusion_total_ms, self.e2e_count),
+            "avg_final_output_time_ms": self._average(self.final_output_total_ms, self.e2e_count),
+            "avg_breakdown_delta_time_ms": self._average(breakdown_delta_ms, self.e2e_count),
             "avg_tokens_per_s": float(avg_tok),
         }
         for edge, handoff_time in sorted(handoff_edge_totals.items()):
