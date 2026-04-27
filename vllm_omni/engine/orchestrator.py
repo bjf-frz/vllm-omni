@@ -115,6 +115,9 @@ class OrchestratorRequestState:
 
     streaming: StreamingInputState = field(default_factory=lambda: StreamingInputState())
 
+    # Per-request pipeline timing accumulator (milliseconds)
+    pipeline_timings: dict[str, float] = field(default_factory=dict)
+
 
 @dataclass
 class StreamingInputState:
@@ -636,6 +639,7 @@ class Orchestrator:
             stage_end_ts=now,
             request_dispatch_wait_time_ms=float(getattr(req_state, "request_dispatch_wait_time_ms", 0.0)),
             stage_latency_time_ms=stage_wall_time_ms,
+            pipeline_timings=dict(req_state.pipeline_timings),
         )
 
     def _build_kv_sender_info(self, sender_stage_ids: list[int]) -> dict[int, dict[str, Any]] | None:
@@ -699,6 +703,14 @@ class Orchestrator:
                 ar2diffusion_ms = _dt_ar2d
                 if stage_metrics is not None:
                     stage_metrics.ar2diffusion_time_ms = _dt_ar2d
+                req_state.pipeline_timings["ar2diffusion_ms"] = _dt_ar2d
+                logger.info(
+                    "[Orchestrator] ar2diffusion req=%s wall_time=%.3fms stage=%d->%d",
+                    req_id,
+                    _dt_ar2d,
+                    stage_id,
+                    next_stage_id,
+                )
                 if isinstance(diffusion_prompt, list):
                     if not diffusion_prompt:
                         error_output = OmniRequestOutput.from_error(
@@ -946,6 +958,15 @@ class Orchestrator:
                 0.0,
                 (req_state.stage_submit_ts[stage_id] - request_dispatch_start_ts) * 1000.0,
             )
+
+        # Per-request pipeline timings from caller thread
+        _enqueue_ts = msg.get("enqueue_ts", 0.0)
+        if _enqueue_ts > 0:
+            req_state.pipeline_timings["queue_wait_ms"] = (_time.perf_counter() - _enqueue_ts) * 1000.0
+        _preprocess_ms = msg.get("preprocess_ms", 0.0)
+        if _preprocess_ms > 0:
+            req_state.pipeline_timings["preprocess_ms"] = _preprocess_ms
+
         self.request_states[request_id] = req_state
 
         # Stage-0 prompt is already a fully-formed OmniEngineCoreRequest

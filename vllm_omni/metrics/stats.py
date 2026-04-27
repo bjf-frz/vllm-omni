@@ -53,6 +53,7 @@ class StageRequestStats:
     handoff_to_stage_id: int | None = None
     stage_handoff_time_ms: float = 0.0
     ar2diffusion_time_ms: float = 0.0
+    pipeline_timings: dict[str, float] | None = None
 
     @property
     def rx_mbps(self) -> float:
@@ -125,6 +126,7 @@ STAGE_EXCLUDE = {
     "handoff_to_stage_id",
     "stage_handoff_time_ms",
     "ar2diffusion_time_ms",
+    "pipeline_timings",
 }
 TRANSFER_EXCLUDE = {"from_stage", "to_stage", "request_id", "used_shm"}
 E2E_EXCLUDE = {"request_id"}
@@ -1137,6 +1139,8 @@ class OrchestratorAggregator:
                 self.stage_events.get(rid, []),
                 key=lambda e: e.stage_id if e.stage_id is not None else -1,
             )
+
+            # === Stage table (columns = stage_id) ===
             # if any stage has diffusion_metrics, remove postprocess_time_ms field
             # because it is already included in diffusion_metrics
             local_exclude = STAGE_EXCLUDE.copy()

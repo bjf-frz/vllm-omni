@@ -40,6 +40,7 @@ from vllm_omni.entrypoints.openai.protocol.audio import (
     SpeechBatchItem,
     SpeechBatchItemResult,
 )
+from vllm_omni.entrypoints.utils import coerce_param_message_types
 from vllm_omni.model_executor.models.fish_speech.prompt_utils import (
     build_fish_text_only_prompt_ids,
     estimate_fish_voice_clone_prompt_len_from_normalized,
@@ -1628,6 +1629,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
+        # If this is a streaming request, we need to coerce
+        # cumulative outputs to delta outputs; this ensures
+        # we don't emit redundant MM data & drain after emitting.
+        # list() makes a copy to avoid mutating the params.
+        sampling_params_list = list(self.engine_client.default_sampling_params_list)
+        sampling_params_list = coerce_param_message_types(sampling_params_list, request.stream)
+
         if self._is_fish_speech:
             validation_error = self._validate_fish_tts_request(request)
             if validation_error:
@@ -1743,8 +1751,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             model_type,
         )
 
-        sampling_params_list = self.engine_client.default_sampling_params_list
-
         # CosyVoice3: set dynamic min/max tokens based on text length.
         # The official model requires min_token_text_ratio to prevent early
         # EOS and max_token_text_ratio to cap generation length.
@@ -1790,6 +1796,22 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
             sampling_params_list = copy.deepcopy(sampling_params_list)
             sampling_params_list[0].max_tokens = request.max_new_tokens
+
+        # Propagate per-request seed to sampling params so both Slow AR
+        # and Fast AR produce deterministic output for the same seed.
+        if request.seed is not None and sampling_params_list:
+            if not self._is_fish_speech:
+                logger.warning(
+                    "seed=%d requested but deterministic Fast AR seeding is "
+                    "only implemented for Fish Speech; other TTS models will "
+                    "use the seed for the main AR sampler only.",
+                    request.seed,
+                )
+            if sampling_params_list is self.engine_client.default_sampling_params_list:
+                import copy
+
+                sampling_params_list = copy.deepcopy(sampling_params_list)
+            sampling_params_list[0].seed = request.seed
 
         generator = self.engine_client.generate(
             prompt=prompt,
