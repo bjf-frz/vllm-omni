@@ -6,10 +6,11 @@ nav:
     - getting_started/installation/*
   - Serving:
     - OpenAI-Compatible API:
-      - Diffusion Chat API: serving/diffusion_chat_api.md
+      - Chat Completions API: serving/chat_completions_api.md
       - Image Generation: serving/image_generation_api.md
       - Image Edit: serving/image_edit_api.md
       - Text to Speech: serving/speech_api.md
+      - Videos: serving/videos_api.md
       - Streaming Video Input: serving/video_stream_api.md
   - Examples:
     - examples/README.md
@@ -63,6 +64,7 @@ nav:
         - Cache-DiT: user_guide/diffusion/cache_acceleration/cache_dit.md
       - Quantization:
         - Overview: user_guide/diffusion/quantization/overview.md
+        - AutoRound: user_guide/diffusion/quantization/autoround.md
         - FP8: user_guide/diffusion/quantization/fp8.md
         - Int8: user_guide/diffusion/quantization/int8.md
         - GGUF: user_guide/diffusion/quantization/gguf.md
@@ -96,6 +98,7 @@ nav:
   - Design Documents:
     - design/index.md
     - design/architecture_overview.md
+    - Qwen3-Omni and Qwen3-TTS Performance Optimization: design/qwen3_omni_tts_performance_optimization.md
     - Feature Design:
       - design/feature/disaggregated_inference.md
       - design/feature/ray_based_execution.md
