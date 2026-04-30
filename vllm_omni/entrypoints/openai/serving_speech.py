@@ -65,6 +65,7 @@ _OMNIVOICE_TTS_MODEL_STAGES = {"omnivoice_generator"}
 _VOXCPM_TTS_MODEL_STAGES = {"latent_generator", "vae"}
 _VOXCPM2_TTS_MODEL_STAGES = {"latent_generator"}
 _MING_TTS_MODEL_STAGES = {"ming_tts"}
+_MOSS_TTS_MODEL_STAGES = {"moss_tts_nano"}
 _TTS_MODEL_STAGES: set[str] = (
     _VOXTRAL_TTS_MODEL_STAGES
     | _QWEN3_TTS_MODEL_STAGES
@@ -74,6 +75,7 @@ _TTS_MODEL_STAGES: set[str] = (
     | _VOXCPM_TTS_MODEL_STAGES
     | _VOXCPM2_TTS_MODEL_STAGES
     | _MING_TTS_MODEL_STAGES
+    | _MOSS_TTS_MODEL_STAGES
 )
 _TTS_LANGUAGES: set[str] = {
     "Auto",
@@ -195,6 +197,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         return instance
 
     def __init__(self, *args, **kwargs):
+        self.model_name = kwargs.pop("model_name", None)
         super().__init__(*args, **kwargs)
         # Initialize uploaded speakers storage (ephemeral — cleared on restart)
         speech_voice_samples_dir = os.environ.get("SPEECH_VOICE_SAMPLES", "/tmp/voice_samples")
@@ -324,6 +327,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return "voxcpm" if has_vae_stage or model_stage == "vae" else "voxcpm2"
         if model_stage in _MING_TTS_MODEL_STAGES:
             return "ming_flash_omni_tts"
+        if model_stage in _MOSS_TTS_MODEL_STAGES:
+            return "moss_tts_nano"
         return None
 
     def _compute_max_instructions_length(self) -> int:
@@ -855,6 +860,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return None  # VoxCPM2 accepts any text input
         if self._tts_model_type == "ming_flash_omni_tts":
             return self._validate_ming_tts_request(request)
+        if self._tts_model_type == "moss_tts_nano":
+            return self._validate_moss_tts_request(request)
         return self._validate_qwen_tts_request(request)
 
     def _voxcpm2_encode(self, text: str) -> list[int]:
@@ -1109,6 +1116,42 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 return f"max_new_tokens cannot exceed {_TTS_MAX_NEW_TOKENS_MAX}"
 
         return None
+
+    def _validate_moss_tts_request(self, request: OpenAICreateSpeechRequest) -> str | None:
+        """Validate MOSS-TTS-Nano request. Accepts optional ref_audio for voice cloning."""
+        if not request.input or not request.input.strip():
+            return "Input text cannot be empty"
+        if request.ref_audio is not None:
+            fmt_err = self._validate_ref_audio_format(request.ref_audio)
+            if fmt_err:
+                return fmt_err
+            if not request.ref_text or not request.ref_text.strip():
+                return "Voice cloning requires 'ref_text' (transcript of the reference audio)"
+        return None
+
+    async def _build_moss_tts_params(self, request: OpenAICreateSpeechRequest) -> dict[str, Any]:
+        """Build additional_information for MOSS-TTS-Nano.
+
+        Maps the standard /v1/audio/speech fields to MOSS-TTS-Nano's
+        additional_information keys (text, voice, mode, prompt_audio_array,
+        prompt_text, ...).  Values are wrapped in lists to match the
+        vllm-omni convention.  When ``request.ref_audio`` is provided, it is
+        resolved via MediaConnector and passed as a (wav_list, sample_rate)
+        tuple so the model owns temp-file lifecycle.
+        """
+        params: dict[str, Any] = {
+            "text": [request.input],
+        }
+        if request.voice is not None:
+            params["voice"] = [request.voice]
+        if request.ref_text is not None:
+            params["prompt_text"] = [request.ref_text]
+        if request.max_new_tokens is not None:
+            params["max_new_frames"] = [request.max_new_tokens]
+        if request.ref_audio is not None:
+            wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
+            params["prompt_audio_array"] = [[wav_list, sr]]
+        return params
 
     def _validate_fish_tts_request(self, request: OpenAICreateSpeechRequest) -> str | None:
         """Validate Fish Speech request parameters. Returns error message or None.
@@ -1691,6 +1734,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             elif self._tts_model_type == "ming_flash_omni_tts":
                 prompt = self._build_ming_prompt(request)
                 tts_params = {}
+            elif self._tts_model_type == "moss_tts_nano":
+                tts_params = await self._build_moss_tts_params(request)
+                prompt = {"prompt_token_ids": [1], "additional_information": tts_params}
             else:
                 tts_params = self._build_tts_params(request)
                 # Resolve ref_audio (explicit or auto-set for uploaded voices)
@@ -1740,6 +1786,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             model_type = "voxcpm2"
         elif self._tts_model_type == "ming_flash_omni_tts":
             model_type = "ming_flash_omni_tts"
+        elif self._tts_model_type == "moss_tts_nano":
+            model_type = "moss_tts_nano"
         elif self._is_tts:
             model_type = tts_params.get("task_type", ["unknown"])[0]
         else:
@@ -1903,6 +1951,14 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if not request.input or not request.input.strip():
                 raise ValueError("Input text cannot be empty")
 
+            # Validate ref_audio format up-front so that bogus inputs return a
+            # 4xx instead of falling through to MediaConnector and surfacing as
+            # a 500 Internal Server Error (e.g. test_voice_clone_invalid_ref_audio_format).
+            if request.ref_audio is not None:
+                fmt_err = self._validate_ref_audio_format(request.ref_audio)
+                if fmt_err:
+                    return self._diffusion_error_response(fmt_err, status_code=400)
+
             request_id = f"speech-{random_uuid()}"
             prompt: dict[str, Any] = {"input": request.input}
             if request.ref_audio:
@@ -1969,16 +2025,28 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         except (EngineGenerateError, EngineDeadError):
             raise  # Propagate to the global Omni exception handler
         except ValueError as e:
-            return self._diffusion_error_response(str(e))
+            # ValueError represents invalid client input (bad ref_audio URI,
+            # empty text, model-side validation failures forwarded as ValueError, ...).
+            # Return 400 to match `create_speech`'s `self.create_error_response(e)`
+            # default (HTTPStatus.BAD_REQUEST) rather than masking it as a 500.
+            return self._diffusion_error_response(str(e), status_code=400)
         except Exception as e:
             logger.exception("Diffusion speech generation failed: %s", e)
             return self._diffusion_error_response(f"Speech generation failed: {e}")
 
     @staticmethod
-    def _diffusion_error_response(message: str) -> Response:
-        """Create a JSON error response without depending on OpenAIServing."""
-        error_body = json.dumps({"error": {"message": message, "type": "server_error", "param": None, "code": 500}})
-        return Response(content=error_body, media_type="application/json", status_code=500)
+    def _diffusion_error_response(message: str, status_code: int = 500) -> Response:
+        """Create a JSON error response without depending on OpenAIServing.
+
+        Args:
+            message: Error message to surface to the client.
+            status_code: HTTP status code; defaults to 500. Pass a 4xx code for
+                client-input validation failures so the response semantics match
+                the OpenAI-compatible behavior used by ``create_speech``.
+        """
+        err_type = "BadRequestError" if 400 <= status_code < 500 else "server_error"
+        error_body = json.dumps({"error": {"message": message, "type": err_type, "param": None, "code": status_code}})
+        return Response(content=error_body, media_type="application/json", status_code=status_code)
 
     async def create_speech(
         self,
