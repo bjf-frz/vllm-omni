@@ -27,7 +27,7 @@ classifier-free guidance.
 
 ## Hardware Support
 
-## CUDA
+## GPU
 
 ### 8x NVIDIA H20 / H100 / A100
 
@@ -78,14 +78,14 @@ parallelism at `--usp 4` so the two CFG branches cover all 8 GPUs.
 - `--use-hsdp` is recommended for memory efficiency on the 14B DiT backbone.
 - `--vae-patch-parallel-size 8` is recommended for the standard 8-card setup;
   disabling VAE patch parallelism can significantly increase VAE latency.
-- `VLLM_OMNI_ENABLE_TRITON_ADALN=1` enables the CUDA Triton fused
-  AdaLayerNorm path when available. It is the default in builds that include
-  the fused kernel, and can be set to `0` for rollback or A/B testing.
+- The CUDA Triton fused AdaLayerNorm path is not available in the current
+  release. The `VLLM_OMNI_ENABLE_TRITON_ADALN` toggle is reserved for that
+  future implementation and should not be used until the kernel lands.
 - In an 8x NVIDIA H20 test with the official model, `num_inference_steps=4`,
   `flow_shift=12.0`, `--use-hsdp`, `--cfg-parallel-size 2`, `--usp 4`, and
-  `--vae-patch-parallel-size 8`, the Triton AdaLayerNorm path reduced the
-  measured diffusion stage by about `65 ms` at `832x480, 81 frames` and about
-  `741 ms` at `1280x720, 121 frames`.
+  `--vae-patch-parallel-size 8`, an internal Triton AdaLayerNorm prototype
+  reduced the measured diffusion stage by about `65 ms` at
+  `832x480, 81 frames` and about `741 ms` at `1280x720, 121 frames`.
 
 ## NPU
 
