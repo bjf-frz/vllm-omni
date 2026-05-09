@@ -79,7 +79,12 @@ def summarize_trace(path: Path, min_gap_us: float, topn: int) -> None:
     span = max(end for _, end, *_ in gpu) - min(start for start, *_ in gpu)
     busy = sum(end - start for start, end, _ in merged)
     idle = span - busy
-    print(f"gpu_span_s={span / 1e6:.3f} busy_union_s={busy / 1e6:.3f} idle_union_s={idle / 1e6:.3f} idle_pct={idle / span * 100:.2f}")
+    print(
+        f"gpu_span_s={span / 1e6:.3f} "
+        f"busy_union_s={busy / 1e6:.3f} "
+        f"idle_union_s={idle / 1e6:.3f} "
+        f"idle_pct={idle / span * 100:.2f}"
+    )
 
     interesting_cpu = [
         row
