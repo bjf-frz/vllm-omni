@@ -97,7 +97,6 @@ nav:
   - Design Documents:
     - design/index.md
     - design/architecture_overview.md
-    - Qwen3-Omni and Qwen3-TTS Performance Optimization: design/qwen3_omni_tts_performance_optimization.md
     - Feature Design:
       - design/feature/disaggregated_inference.md
       - design/feature/ray_based_execution.md

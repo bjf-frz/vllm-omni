@@ -348,10 +348,20 @@ async def async_request_v1_videos(
     return output
 
 
+LEGACY_BACKEND_ENDPOINT_ALIASES = {
+    "vllm-omni": "/v1/chat/completions",
+    "openai": "/v1/images/generations",
+}
+
+
 def normalize_endpoint(value: str) -> str:
     endpoint = str(value).strip()
     if not endpoint:
         raise ValueError("endpoint must not be empty.")
+    endpoint = LEGACY_BACKEND_ENDPOINT_ALIASES.get(
+        endpoint,
+        LEGACY_BACKEND_ENDPOINT_ALIASES.get(endpoint.lstrip("/"), endpoint),
+    )
     if not endpoint.startswith("/"):
         endpoint = f"/{endpoint}"
     return endpoint

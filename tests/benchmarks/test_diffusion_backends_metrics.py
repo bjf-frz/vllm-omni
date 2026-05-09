@@ -47,6 +47,14 @@ def test_endpoint_normalization_accepts_optional_leading_slash():
 @pytest.mark.core_model
 @pytest.mark.benchmark
 @pytest.mark.cpu
+def test_endpoint_normalization_accepts_legacy_backend_aliases():
+    assert normalize_endpoint("vllm-omni") == "/v1/chat/completions"
+    assert normalize_endpoint("openai") == "/v1/images/generations"
+
+
+@pytest.mark.core_model
+@pytest.mark.benchmark
+@pytest.mark.cpu
 def test_endpoint_filename_token_drops_leading_slash():
     assert endpoint_filename_token("/v1/videos") == "v1_videos"
     assert endpoint_filename_token("v1/chat/completions") == "v1_chat_completions"
