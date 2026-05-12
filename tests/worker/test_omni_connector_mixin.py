@@ -354,15 +354,15 @@ class TestFinishedLoadReqsDrain(unittest.TestCase):
 
 
 class TestLoadCustomFuncSelection(unittest.TestCase):
-    def test_skips_legacy_stage_list_processors_for_full_payload_mode(self):
-        legacy_paths = [
+    def test_skips_non_payload_stage_input_processors_for_full_payload_mode(self):
+        incompatible_paths = [
             "vllm_omni.model_executor.stage_input_processors.mimo_audio.llm2code2wav",
             "vllm_omni.model_executor.stage_input_processors.mammoth_moda2.ar2dit",
             "vllm_omni.model_executor.stage_input_processors.cosyvoice3.text2flow",
             "vllm_omni.model_executor.stage_input_processors.glm_image.ar2diffusion",
         ]
 
-        for func_path in legacy_paths:
+        for func_path in incompatible_paths:
             selected_path, func = MixinHost._load_custom_func(
                 SimpleNamespace(
                     async_chunk=False,
@@ -607,6 +607,7 @@ class TestCleanupFinishedRequest(unittest.TestCase):
         host._get_req_chunk[req_id] = 3
         host._send_side_request_payload[ext_id] = {"some": "data"}
         host._code_prompt_token_ids[ext_id] = [[1, 2, 3]]
+        host._cached_ic[ext_id] = 16
         host._chunk_stream_completed.add(req_id)
         host._stage_recv_req_ids.add(req_id)
         host._local_stage_payload_cache[req_id] = {"engine_inputs": {}}
@@ -621,6 +622,7 @@ class TestCleanupFinishedRequest(unittest.TestCase):
         self.assertNotIn(req_id, host._get_req_chunk)
         self.assertNotIn(ext_id, host._send_side_request_payload)
         self.assertNotIn(ext_id, host._code_prompt_token_ids)
+        self.assertNotIn(ext_id, host._cached_ic)
         self.assertNotIn(req_id, host._chunk_stream_completed)
         self.assertNotIn(req_id, host._stage_recv_req_ids)
         self.assertNotIn(req_id, host._local_stage_payload_cache)
@@ -656,11 +658,34 @@ class TestCleanupFinishedRequest(unittest.TestCase):
         # Stage-0 uses req_id directly (no ext_id mapping)
         host._put_req_chunk[req_id] = 3
         host._get_req_chunk[req_id] = 0
+        host._cached_ic[req_id] = 4
 
         host.cleanup_finished_request(req_id)
 
         self.assertNotIn(req_id, host._put_req_chunk)
         self.assertNotIn(req_id, host._get_req_chunk)
+        self.assertNotIn(req_id, host._cached_ic)
+
+        host.shutdown_omni_connectors()
+
+    def test_deferred_cleanup_removes_cached_ic(self):
+        host = self._make_host(stage_id=1)
+        req_id = "req-1"
+        ext_id = "ext-req-1"
+
+        host._request_ids_mapping[req_id] = ext_id
+        host._pending_save_counts[ext_id] = 1
+        host._cached_ic[ext_id] = 8
+
+        host.cleanup_finished_request(req_id)
+
+        self.assertIn(ext_id, host._deferred_send_cleanup)
+        self.assertIn(ext_id, host._cached_ic)
+
+        host._decrement_pending_save_count(ext_id)
+
+        self.assertNotIn(ext_id, host._deferred_send_cleanup)
+        self.assertNotIn(ext_id, host._cached_ic)
 
         host.shutdown_omni_connectors()
 
