@@ -383,38 +383,38 @@ Validation:
 - Measure E2E wall-clock, per-stage server timings, output FPS/resolution,
   artifacts, flicker, and user-visible quality.
 
-### Successful Practice Examples
+### Optimization Candidate Library
 
-Use this section as a practical candidate library. These are not automatic
-recommendations; each item still needs evidence, an implementation path, and
-quality validation for the target model/workload.
+Use this table as a compact menu, not as automatic recommendations. Pick items
+only when baseline metrics, trace evidence, source inspection, or quality
+tolerance supports them.
 
-| Layer | Practice example | Typical evidence | Priority | Validation focus |
+| Layer | Candidate | Evidence | Priority | Validation focus |
 |---|---|---|---|---|
-| Operator / attention | Replace FA with LA when the target shape benefits | FA dominates CUDA time; LA is supported for the shape and quality tolerance | P2 | `diffuse` latency, quality, temporal stability |
-| Operator / attention | Add LA preprocessing | LA chosen but preprocessing overhead or layout mismatch appears in trace | P1/P2 | preprocessing time, attention time, output quality |
-| Operator / attention | LA for selected heads to reduce downclock/frequency pressure | GPU frequency or kernel behavior suggests full attention path causes downclock | P2 | frequency logs, latency, quality |
-| Operator / cross-attn | Change cross-attention layout to BSND to remove transpose | Trace/source shows repeated transpose/copy around cross-attn | P1 | copy/transpose kernel reduction, exactness |
-| Operator / fusion | Fuse AdaLayerNorm + LayerNorm path | Repeated norm + scale/shift + elementwise kernels | P1 | latency, numerical tolerance |
-| Operator / fusion | Replace RMSNorm small kernels with fused RMSNorm | RMSNorm appears as many small kernels | P1 | latency, numerical tolerance |
-| Operator / precision | Convert fp32 LayerNorm to bf16 where safe | fp32 norm path is visible and quality allows bf16 | P1/P2 | quality, stability, latency |
-| Operator / RoPE | Move RoPE earlier into forward to avoid repeated prep | RoPE prep repeated per block/step or causes layout churn | P1 | kernel count, correctness |
-| Operator / RoPE | Replace RoPE small kernels with fused RoPE | RoPE elementwise kernels are high-frequency | P1/P2 | latency, numerical tolerance |
-| Operator / RoPE/layout | Remove small kernels before/after RoPE | Trace shows copy/reshape/cat/split around RoPE | P1 | layout kernel count, compile behavior |
-| VAE / fusion | Replace VAE RMSNorm kernels | VAE norm kernels material in encode/decode trace | P1 | `vae.encode/decode`, video artifacts |
-| Parallel / cross-attn | Make cross-attention non-parallel | Condition token count is small and SP overhead dominates cross-attn | P1 | `diffuse`, NCCL, correctness |
-| Parallel / VAE | Enable/tune VAE parallelism | VAE encode/decode is large or OOM risk requires tiling/parallelism | P0/P1 | VAE time, memory, output correctness |
-| VAE / precision | Convert VAE float path to bf16 | VAE float kernels are slow and bf16 quality is acceptable | P1/P2 | artifacts, flicker, seed stability |
-| Host/runtime | Remove multiple `free` / `empty_cache` sections in pipeline | Host-stack trace shows repeated free/empty_cache gaps | P0/P1 | latency, peak memory, OOM safety |
-| Host/VAE | Reduce VAE gather wait | Host-stack or all-rank trace shows gather wait around VAE | P1 | rank balance, VAE decode, output file correctness |
-| Host/framework | Reduce omni framework scheduling overhead | Client vs server or trace shows request scheduling gaps | P1 | E2E latency, throughput |
-| Communication | Communication ratio analysis | Need to distinguish NCCL kernel time from annotation overcount | P0 | kernel-level NCCL totals, rank comparison |
-| Parallel / memory | HSDP on/off or HSDP buffer optimization | HSDP affects memory or all_gather allocation gaps | P1 | memory, latency, OOM risk |
-| Sparse/quant | Rainfusion 2.0 style sparsity | Attention/DiT compute remains dominant and quality tolerance exists | P2 | quality, speed, stability |
-| Sparse/quant | VAE decode quantization | VAE decode dominates target scenario and quality tolerance exists | P2 | artifacts, flicker, decode time |
-| Interpolation | Frame interpolation optimization | Fewer generated frames plus interpolation meets FPS/quality target | P1/P2 | E2E latency, motion artifacts |
-| Super-resolution | Add or optimize SR model | Lower base resolution plus SR may beat high-res base generation | P1/P2 | E2E latency, detail/artifact quality |
-| E2E | E2E performance and fast/slow-card analysis | Multi-stage or multi-card service has stragglers | P0/P1 | per-stage time, per-rank time, user wall-clock |
+| Measurement | Freeze server/request/benchmark commands | Missing or drifting commands | P0 | Repeatable non-profiler A/B |
+| Measurement | Separate baseline and diagnostic profiler runs | Profiler used for latency claims | P0 | Low-overhead stage timings |
+| Host/runtime | Guard or remove avoidable `empty_cache` | Host-stack gaps or sync stalls | P0/P1 | Latency, peak memory, OOM safety |
+| Host/runtime | Cache scheduler coefficients/timesteps | Repeated tiny CPU/GPU work | P0/P1 | Same seed/output, stage timing |
+| Host/runtime | Reduce framework scheduling overhead | Client time exceeds server time | P1 | E2E latency, throughput |
+| Parallel | `CFG=2 x USP=world/2` vs `USP=world` | CFG doubles forward work | P0/P1 | `diffuse`, NCCL, memory |
+| Parallel | Tune VAE patch parallelism | VAE encode/decode is material | P0/P1 | VAE time, output correctness |
+| Parallel | HSDP on/off or buffer reuse | HSDP affects memory/all-gather | P1 | Memory, latency, OOM risk |
+| Parallel | Ulysses vs Ulysses+Ring | Long sequence all-to-all suspected | P1/P2 | Rank balance, NCCL kernels |
+| Cross-attn | Disable SP for short condition tokens | Cross-attn comm exceeds compute | P1 | `diffuse`, correctness |
+| VAE/media | Reduce VAE gather/broadcast | Rank traces show VAE wait | P1 | Rank balance, output file |
+| VAE/media | Reuse tile metadata/buffers | Tile split/merge host gaps | P1 | `vae.encode/decode`, memory |
+| VAE/media | VAE bf16/autocast | VAE float kernels are slow | P1/P2 | Artifacts, flicker, seed stability |
+| Operator fusion | AdaLayerNorm/LayerNorm fusion | Norm plus scale/shift kernels | P1 | Numeric tolerance, latency |
+| Operator fusion | RMSNorm fusion | Many small RMSNorm kernels | P1 | Numeric tolerance, latency |
+| Operator fusion | RoPE cache/fuse/layout cleanup | RoPE copy/reshape kernels | P1/P2 | Kernel count, correctness |
+| Operator layout | QKV or attention layout cleanup | Copy/cat/split around attention | P1 | Copy kernels, compile behavior |
+| Attention | Verify backend fast path | FA/SDPA dominates trace | P1 | `diffuse`, attention kernels |
+| Attention | FA to LA or selected-head LA | Attention remains dominant | P2 | Quality, temporal stability |
+| Precision | Transformer FP8/quantization | Compute/bandwidth bound and allowed | P2 | Quality, speed, stability |
+| Sparsity | Rainfusion-style acceleration | DiT compute remains dominant | P2 | Prompt diversity, quality |
+| Pipeline | Frame interpolation | Fewer base frames can meet FPS | P1/P2 | E2E latency, motion artifacts |
+| Pipeline | Super-resolution | Lower base res plus SR may win | P1/P2 | Detail quality, artifacts |
+| E2E | Fast/slow-card analysis | Multi-card stragglers | P0/P1 | Per-rank/stage wall-clock |
 
 ### Optimization Plan Template
 
@@ -450,253 +450,30 @@ or instrumentation fixes.
 
 ## Analysis Helpers
 
-### Torch profiler trace format
+PyTorch profiler traces are Chrome/Perfetto-compatible JSON files, usually
+`trace_rankN.json` or `trace_rankN.json.gz`. They normally contain a top-level
+`traceEvents` list, though some exporters emit the raw event list directly.
 
-PyTorch exports Chrome trace / Perfetto-compatible JSON. The file is usually
-named `trace_rankN.json` or `trace_rankN.json.gz`. The top-level payload is
-normally:
-
-```json
-{
-  "traceEvents": [
-    {
-      "name": "kernel or annotation name",
-      "cat": "kernel",
-      "ph": "X",
-      "ts": 1234567890,
-      "dur": 1234,
-      "pid": 123,
-      "tid": 456,
-      "args": {}
-    }
-  ]
-}
-```
-
-Key fields:
-
-- `traceEvents`: list of timeline events. Some tools may emit a raw list
-  directly; handle both forms.
-- `name`: event name, such as a CUDA kernel, `nccl:all_to_all`,
-  `pipeline_forward`, or a Python function path.
-- `cat`: category. Common categories:
-  - GPU work: `kernel`, `gpu_memcpy`, `gpu_memset`.
-  - CPU/host work: `python_function`, `user_annotation`, `cpu_op`,
-    `cuda_runtime`, `cuda_driver`.
-- `ph`: event phase. Duration events are usually `X`; instant/counter/metadata
-  events may not have useful duration.
-- `ts`: start timestamp in microseconds.
-- `dur`: duration in microseconds.
-- `pid` and `tid`: process/thread lanes used by Chrome/Perfetto to draw the
-  timeline.
-- `args`: optional metadata such as shapes, stack info, stream ids, or labels.
-
-Timeline interpretation:
-
-- A horizontal bar is one event spanning `[ts, ts + dur]` on a `pid`/`tid` lane.
-- GPU lanes contain kernels/memcpy/memset. CPU lanes contain Python functions,
-  PyTorch ops, annotations, and CUDA runtime calls.
-- A GPU free bubble is a time interval where no GPU event is active between two
-  adjacent merged GPU busy intervals.
-- User annotations can contain nested CUDA kernels. Do not treat annotation
-  duration as kernel time without comparing it to the underlying `kernel`
-  events. This is especially important for NCCL annotations.
-- `Command Buffer Full` is profiler/CUPTI overhead and is not a model
-  optimization target.
-
-Use `scripts/trace_analyzer.py` for local torch profiler traces:
+Use the checked-in analyzer from the repository root:
 
 ```bash
-python3 skills/vllm-omni-perf-opt/scripts/trace_analyzer.py \
+python3 .claude/skills/diffusion-perf-opt/scripts/trace_analyzer.py \
   vllm_profile/.../trace_rank0.json.gz \
-  vllm_profile/.../trace_rank1.json.gz \
-  --min-gap-ms 5
-```
-
-Correct usage patterns:
-
-```bash
-# Analyze one rank first.
-python3 skills/vllm-omni-perf-opt/scripts/trace_analyzer.py \
-  vllm_profile/.../trace_rank0.json.gz \
-  --min-gap-ms 5 \
-  --topn 20
-
-# Compare several ranks when imbalance is suspected.
-python3 skills/vllm-omni-perf-opt/scripts/trace_analyzer.py \
-  vllm_profile/.../trace_rank0.json.gz \
-  vllm_profile/.../trace_rank1.json.gz \
-  vllm_profile/.../trace_rank2.json.gz \
-  vllm_profile/.../trace_rank3.json.gz \
-  --min-gap-ms 5 \
-  --topn 20
-
-# Lower the threshold to inspect small CPU scheduling or VAE gaps.
-python3 skills/vllm-omni-perf-opt/scripts/trace_analyzer.py \
-  vllm_profile/.../trace_rank0.json.gz \
-  --min-gap-ms 1 \
-  --topn 50
-```
-
-Parameter reference:
-
-| Parameter | Required | Default | Meaning | When to use |
-|---|---:|---:|---|---|
-| `traces` | yes | none | One or more `trace.json` or `trace.json.gz` files. Each file is analyzed independently and printed as a separate section. | Pass one rank first, usually `trace_rank0.json.gz`. Pass multiple ranks when checking rank imbalance or comparing CFG/SP groups. |
-| `--min-gap-ms` | no | `5.0` | Minimum GPU free-bubble duration to print, in milliseconds. The script computes merged GPU busy intervals from `kernel`, `gpu_memcpy`, and `gpu_memset`; gaps between those intervals above this threshold are reported. | Use `5` for normal profiling. Use `1` to inspect small host/VAE/scheduler gaps. Use `10` or `20` when traces are noisy and only large stalls matter. |
-| `--topn` | no | `20` | Number of large gaps, top GPU/operator names, and top NCCL-like entries to print. | Use `20` for normal reports. Use `50` or higher when searching for many small kernels or many small idle gaps. |
-
-Choose the command by question:
-
-| Question | Command pattern | Read these output sections |
-|---|---|---|
-| Is this rank GPU-idle-bound? | `trace_analyzer.py trace_rank0.json.gz --min-gap-ms 5` | `gpu_span_s`, `busy_union_s`, `idle_union_s`, `idle_pct`. If `idle_pct` is low, prioritize kernel/operator work. If high, inspect `GAP` sections. |
-| What code caused GPU idle bubbles? | `trace_analyzer.py trace_rank0.json.gz --min-gap-ms 1 --topn 50` on a host-stack trace | Each `GAP` block. Look at `prev`, `next`, and `in python_function ... file.py(line)` lines. |
-| What are the hottest real GPU kernels? | `trace_analyzer.py trace_rank0.json.gz --min-gap-ms 5 --topn 30` on an operator/shape trace | `Top GPU/operator events by total duration`. Prefer `cat=kernel` style entries over annotations. |
-| Is NCCL/communication the bottleneck? | Same command, optionally across all ranks | `Top NCCL-like events by category`. Compare `cat=kernel` or `cat=gpu_user_annotation` against total GPU span. Treat `cat=user_annotation` as an enclosing range that can overcount. |
-| Is there rank imbalance? | Pass all relevant ranks in one command, for example rank0-3 for one USP group or rank0 and rank4 for CFG groups | Compare each rank section's `gpu_span_s`, `idle_pct`, top kernels, and NCCL totals. A straggler usually has longer span or other ranks show large idle gaps waiting near NCCL/sync events. |
-| Are small VAE/scheduler gaps worth investigating? | `trace_analyzer.py trace_rank0.json.gz --min-gap-ms 1 --topn 50` on host-stack trace | `GAP` blocks containing VAE paths, scheduler paths, `empty_cache`, `cudaStreamSynchronize`, or allocation paths. |
-
-Detailed example:
-
-```bash
-python3 skills/vllm-omni-perf-opt/scripts/trace_analyzer.py \
-  vllm_profile/wan22_A_720p_host_stack/20260429-094937_stage_0_diffusion_1777456177/trace_rank0.json.gz \
   --min-gap-ms 5 \
   --topn 20
 ```
 
-Example output shape:
+For rank imbalance or communication questions, pass all relevant rank traces in
+one command. For host gaps, lower `--min-gap-ms` to `1` and use a host-stack
+trace. Read `gpu_span_s`, `busy_union_s`, `idle_union_s`, `idle_pct`, `GAP`
+blocks, `Top GPU/operator events by total duration`, and `Top NCCL-like events
+by category`. Treat `cat=user_annotation` NCCL ranges as enclosing annotations;
+prefer `cat=kernel` or `cat=gpu_user_annotation` for real device work.
 
-```text
-== vllm_profile/.../trace_rank0.json.gz
-events=2348143 gpu_events=136631 cpu_events=1738849
-gpu_span_s=103.023 busy_union_s=102.504 idle_union_s=0.519 idle_pct=0.50
-gaps_ge_5.000ms count=6 sum_s=0.125
-
-GAP 63.872 ms ts=2377726779991->2377726843863
-  prev kernel 0.034 ms void at::native::elementwise_kernel<...>
-  next kernel 0.011 ms void at::native::vectorized_elementwise_kernel<...>
-  in   python_function 60.748 ms <built-in function _cuda_emptyCache>
-  in   python_function 60.761 ms torch/cuda/memory.py(268): empty_cache
-
-Top GPU/operator events by total duration:
-       320 total=   71.955s max=  447.996ms void cutlass::device_kernel<flash::...>
-       640 total=    0.688s max=    8.460ms ncclDevKernel_SendRecv(...)
-
-Top NCCL-like events by category:
-       640 total=   53.888s max=  447.968ms cat=user_annotation nccl:all_to_all
-       640 total=    0.688s max=    8.460ms cat=kernel ncclDevKernel_SendRecv(...)
-```
-
-How to read that example:
-
-- `events`, `gpu_events`, `cpu_events`: confirms the trace contains both CPU
-  and GPU events. If `gpu_events=0`, the profiler did not capture CUDA work or
-  the trace is not the right file.
-- `gpu_span_s=103.023`: the first-to-last GPU event window is about
-  `103023 ms`.
-- `busy_union_s=102.504`: after merging overlapping GPU kernels/memcpys, the
-  GPU was busy for about `102504 ms`.
-- `idle_union_s=0.519` and `idle_pct=0.50`: rank 0 has only about `519 ms`
-  free bubble time, so it is not primarily host-idle-bound.
-- `gaps_ge_5.000ms count=6 sum_s=0.125`: six printed gaps are at least
-  `5 ms`, totaling about `125 ms`.
-- A `GAP` block identifies the free bubble. `prev` is the last GPU event
-  before the bubble, `next` is the first GPU event after it, and `in` lines are
-  CPU/Python/user-annotation intervals covering the midpoint of the bubble.
-  In the example, the largest bubble maps to `torch.cuda.empty_cache`.
-- `Top GPU/operator events by total duration` is actual device work. In the
-  example, FlashAttention is dominant.
-- `Top NCCL-like events by category` includes both real kernels and enclosing
-  annotations. In the example, `cat=user_annotation nccl:all_to_all` is
-  `53.888s`, but the actual `cat=kernel ncclDevKernel_SendRecv` is only
-  `0.688s`; do not use the annotation alone as communication time.
-
-Recommended workflow with `trace_analyzer.py`:
-
-1. Start with rank 0 on the operator/shape trace:
-
-   ```bash
-   python3 skills/vllm-omni-perf-opt/scripts/trace_analyzer.py \
-     vllm_profile/.../operator_shapes/.../trace_rank0.json.gz \
-     --min-gap-ms 5 \
-     --topn 20
-   ```
-
-   Decide whether the rank is kernel-bound, communication-heavy, or idle-heavy.
-
-2. If `idle_pct` is high or a gap is unclear, run rank 0 on the host-stack
-   trace:
-
-   ```bash
-   python3 skills/vllm-omni-perf-opt/scripts/trace_analyzer.py \
-     vllm_profile/.../host_stack/.../trace_rank0.json.gz \
-     --min-gap-ms 1 \
-     --topn 50
-   ```
-
-   Use `python_function` lines to map gaps to code paths.
-
-3. If communication or imbalance is suspected, compare multiple ranks:
-
-   ```bash
-   python3 skills/vllm-omni-perf-opt/scripts/trace_analyzer.py \
-     vllm_profile/.../trace_rank0.json.gz \
-     vllm_profile/.../trace_rank1.json.gz \
-     vllm_profile/.../trace_rank2.json.gz \
-     vllm_profile/.../trace_rank3.json.gz \
-     --min-gap-ms 5 \
-     --topn 20
-   ```
-
-   Compare `gpu_span_s`, `idle_pct`, and NCCL kernel totals. For
-   `CFG=2 x USP=4`, compare rank0-3 within one USP group; compare rank0 and
-   rank4 to sample both CFG branches.
-
-4. If the top kernels are clear but shapes matter, open `ops_rankN.xlsx` and
-   inspect `by_shape`; the analyzer intentionally does not print tensor shapes.
-
-What the analyzer reports:
-
-- `events`, `gpu_events`, `cpu_events`: basic trace size and whether GPU/CPU
-  data was captured. `events` is the total number of entries in
-  `traceEvents`; `gpu_events` and `cpu_events` are filtered subsets, not a
-  complete partition. The analyzer only counts GPU events whose `cat` is one of
-  `kernel`, `gpu_memcpy`, or `gpu_memset`, and CPU events whose `cat` is one of
-  `python_function`, `user_annotation`, `cpu_op`, `cuda_runtime`, or
-  `cuda_driver`. Events with missing `ts`, missing `dur`, or `dur <= 0` are
-  skipped for analysis, and metadata/counter/flow/instant/unknown-category
-  events remain in the total `events` count. Therefore
-  `events != gpu_events + cpu_events` is normal.
-- `gpu_span_s`: wall-clock span from first GPU event start to last GPU event
-  end.
-- `busy_union_s`: union of all GPU kernel/memcpy/memset intervals after
-  merging overlaps.
-- `idle_union_s` and `idle_pct`: inferred GPU free bubble time. High values
-  suggest host stalls, synchronization waits, scheduling gaps, or rank
-  imbalance.
-- `gaps_ge_Xms`: count and total duration of GPU free bubbles at or above the
-  threshold.
-- Each `GAP`: previous GPU event, next GPU event, and enclosing CPU/Python or
-  user annotation events. Use this to map idle bubbles back to code paths.
-- `Top GPU/operator events by total duration`: actual GPU kernel/memcpy/memset
-  time, grouped by event name.
-- `Top NCCL-like events by category`: NCCL-related names grouped by category.
-  Prefer `cat=kernel` or `cat=gpu_user_annotation` for actual device work;
-  treat `cat=user_annotation` as an enclosing range that may overcount nested
-  time.
-
-Analyzer limitations:
-
-- It is a summary helper, not a full trace viewer. Use Perfetto or Chrome
-  tracing for visual lane-level inspection.
-- It merges all GPU streams to compute device-level busy/idle. It does not
-  attribute overlap to individual streams.
-- It does not parse tensor shapes directly from `args`; use `ops_rankN.xlsx`
-  `by_shape` or PyTorch key averages for shape-grouped operator analysis.
-- It does not prove quality or final latency. Re-test any optimization with
-  non-profiler baseline/benchmark commands.
+The analyzer summarizes timing only. It does not parse tensor shapes, attribute
+overlap to individual streams, prove quality, or provide final latency claims.
+Use `ops_rankN.xlsx` or PyTorch key averages for shape analysis, and re-test any
+optimization with non-profiler baseline commands.
 
 Read `references/optimization-playbook.md` when drafting the optimization table or comparing candidate techniques.
 

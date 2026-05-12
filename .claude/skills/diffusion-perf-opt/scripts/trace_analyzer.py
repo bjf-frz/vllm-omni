@@ -28,7 +28,7 @@ def summarize_trace(path: Path, min_gap_us: float, topn: int) -> None:
     with open_trace(path) as f:
         data = json.load(f)
 
-    events = data.get("traceEvents", data if isinstance(data, list) else [])
+    events = data if isinstance(data, list) else data.get("traceEvents", [])
     gpu: list[tuple[float, float, float, str, str, Any, Any]] = []
     cpu: list[tuple[float, float, float, str, str, Any, Any]] = []
     by_gpu_name: dict[str, list[float]] = collections.defaultdict(lambda: [0, 0.0, 0.0])
