@@ -113,6 +113,52 @@ def test_build_and_log_summary_e2e_only() -> None:
     assert stage_entry["stages"] == []
 
 
+def test_request_breakdown_log_limit_does_not_truncate_summary_tables() -> None:
+    agg = OrchestratorAggregator(
+        num_stages=1,
+        log_stats=True,
+        wall_start_ts=0.0,
+        final_stage_id_for_e2e=0,
+        request_breakdown_limit=2,
+    )
+    for idx in range(4):
+        agg.e2e_events.append(
+            RequestE2EStats(
+                request_id=f"r{idx}",
+                request_wall_time_ms=10.0,
+                input_preprocess_time_ms=1.0,
+                engine_pipeline_time_ms=9.0,
+                total_tokens=1,
+                transfers_total_time_ms=0.0,
+                transfers_total_bytes=0,
+            )
+        )
+    agg.e2e_count = 4
+
+    lines = agg._build_omni_metrics_summary_lines(
+        {
+            "num_of_requests": 4,
+            "request_wall_time_ms": 40.0,
+            "input_preprocess_wall_time_ms": 4.0,
+            "engine_pipeline_time_ms": 36.0,
+            "final_output_total_time_ms": 0.0,
+            "avg_input_preprocess_time_ms": 1.0,
+            "avg_final_output_time_ms": 0.0,
+        }
+    )
+    rendered = "\n".join(lines)
+
+    assert "Request r0 Breakdown" in rendered
+    assert "Request r1 Breakdown" in rendered
+    assert "Request r2 Breakdown" not in rendered
+    assert "Request r3 Breakdown" not in rendered
+    assert "Request breakdowns shown:" in rendered
+    assert "Request breakdowns omitted:" in rendered
+
+    summary = agg.build_and_log_summary()
+    assert {entry["request_id"] for entry in summary["e2e_table"]} == {"r0", "r1", "r2", "r3"}
+
+
 def test_build_and_log_summary_multiple_requests() -> None:
     agg = OrchestratorAggregator(
         num_stages=2, log_stats=True, wall_start_ts=0.0, final_stage_id_for_e2e={"r1": 1, "r2": 0}

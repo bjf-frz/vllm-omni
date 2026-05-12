@@ -143,6 +143,7 @@ class OmniBase(PDDisaggregationMixin):
         stage_init_timeout = kwargs.pop("stage_init_timeout", 300)
         init_timeout = kwargs.pop("init_timeout", 600)
         log_stats = kwargs.pop("log_stats", False)
+        self.log_stats_request_breakdown_limit = kwargs.pop("log_stats_request_breakdown_limit", 5)
         self._enable_ar_profiler = kwargs.pop("enable_ar_profiler", False)
         # NOTE: read-only lookup — must NOT pop. Popping here drops the key
         # before it reaches ``StageConfigFactory._create_from_registry``, so

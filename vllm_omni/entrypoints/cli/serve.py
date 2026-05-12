@@ -217,6 +217,13 @@ class OmniServeCommand(CLISubcommand):
             help="Enable logging the stats.",
         )
         omni_config_group.add_argument(
+            "--log-stats-request-breakdown-limit",
+            type=int,
+            default=5,
+            help="Maximum number of per-request breakdowns to print in the final stats summary. "
+            "Use a negative value to print all request breakdowns.",
+        )
+        omni_config_group.add_argument(
             "--log-file",
             type=str,
             default=None,

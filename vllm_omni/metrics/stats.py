@@ -161,6 +161,7 @@ OVERALL_FIELDS: list[str] | None = [
 STAGE_FIELDS = _build_field_defs(StageRequestStats, STAGE_EXCLUDE, FIELD_TRANSFORMS)
 TRANSFER_FIELDS = _build_field_defs(TransferEdgeStats, TRANSFER_EXCLUDE, FIELD_TRANSFORMS)
 E2E_FIELDS = _build_field_defs(RequestE2EStats, E2E_EXCLUDE, FIELD_TRANSFORMS)
+DEFAULT_REQUEST_BREAKDOWN_LIMIT = 5
 
 
 class OrchestratorAggregator:
@@ -171,11 +172,13 @@ class OrchestratorAggregator:
         wall_start_ts: float,
         final_stage_id_for_e2e: dict[str, int] | int,
         stage_metadata: list[dict[str, Any]] | None = None,
+        request_breakdown_limit: int | None = DEFAULT_REQUEST_BREAKDOWN_LIMIT,
     ) -> None:
         self.num_stages = int(num_stages)
         self.log_stats = bool(log_stats)
         self.final_stage_id_for_e2e = final_stage_id_for_e2e
         self.stage_metadata = list(stage_metadata or [])
+        self.request_breakdown_limit = self._normalize_request_breakdown_limit(request_breakdown_limit)
         self.init_run_state(wall_start_ts)
         self.stage_events: dict[str, list[StageRequestStats]] = {}
         self.transfer_events: dict[
@@ -235,6 +238,13 @@ class OrchestratorAggregator:
 
     def _format_ms(self, ms: float) -> str:
         return f"{ms:,.3f} ms"
+
+    @staticmethod
+    def _normalize_request_breakdown_limit(limit: int | None) -> int | None:
+        if limit is None:
+            return None
+        limit = int(limit)
+        return None if limit < 0 else limit
 
     def _log_omni_timing(self, evt: RequestE2EStats) -> None:
         rid = evt.request_id
@@ -558,7 +568,22 @@ class OrchestratorAggregator:
                 ]
             )
 
-        for rid in sorted(set(self.stage_events.keys()) | {evt.request_id for evt in self.e2e_events}):
+        all_breakdown_request_ids = sorted(set(self.stage_events.keys()) | {evt.request_id for evt in self.e2e_events})
+        if self.request_breakdown_limit is None:
+            breakdown_request_ids = all_breakdown_request_ids
+        else:
+            breakdown_request_ids = all_breakdown_request_ids[: self.request_breakdown_limit]
+        omitted_breakdowns = len(all_breakdown_request_ids) - len(breakdown_request_ids)
+        if omitted_breakdowns > 0:
+            lines.extend(
+                [
+                    "",
+                    self._summary_line("Request breakdowns shown:", len(breakdown_request_ids)),
+                    self._summary_line("Request breakdowns omitted:", omitted_breakdowns),
+                ]
+            )
+
+        for rid in breakdown_request_ids:
             stage_evts = sorted(
                 self.stage_events.get(rid, []),
                 key=lambda evt: evt.stage_id if evt.stage_id is not None else -1,

@@ -31,6 +31,23 @@ def test_serve_parser_accepts_no_async_chunk() -> None:
     assert args.async_chunk is False
 
 
+def test_serve_parser_accepts_log_stats_request_breakdown_limit() -> None:
+    try:
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+    except Exception as exc:
+        pytest.skip(f"Cannot build parser in this environment: {exc}")
+
+    root = FlexibleArgumentParser()
+    subparsers = root.add_subparsers(dest="subcommand")
+    cmd = OmniServeCommand()
+    cmd.subparser_init(subparsers)
+
+    argv = ["serve", "fake-model", "--omni", "--log-stats-request-breakdown-limit", "5"]
+    args = root.parse_args(argv)
+
+    assert args.log_stats_request_breakdown_limit == 5
+
+
 def _make_headless_args() -> argparse.Namespace:
     return argparse.Namespace(
         model="fake-model",

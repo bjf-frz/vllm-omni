@@ -126,6 +126,7 @@ class Omni(OmniBase):
                 wall_start_ts,
                 req_final_stage_ids,
                 stage_metadata=getattr(self.engine, "stage_metadata", None),
+                request_breakdown_limit=self.log_stats_request_breakdown_limit,
             )
 
             for req_id, prompt in zip(request_ids, request_prompts):

@@ -302,6 +302,7 @@ class AsyncOmni(EngineClient, OmniBase):
                 wall_start_ts,
                 final_stage_id_for_e2e,
                 stage_metadata=getattr(self.engine, "stage_metadata", None),
+                request_breakdown_limit=self.log_stats_request_breakdown_limit,
             )
             req_state = ClientRequestState(request_id)
             req_state.metrics = metrics
