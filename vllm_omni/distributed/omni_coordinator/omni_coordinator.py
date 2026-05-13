@@ -278,18 +278,26 @@ class OmniCoordinator:
         try:
             input_addr = event.input_addr
 
-            # Heartbeat: only update last_heartbeat; if previously ERROR,
-            # promote back to UP and broadcast once.
+            # Heartbeat: refresh last_heartbeat and queue_length. The stage
+            # client refreshes queue_length just-in-time via its
+            # ``_on_heartbeat`` hook, so heartbeats are the only periodic
+            # source of live load for LeastQueueLengthBalancer; failing to
+            # propagate it here would let the policy route on stale data.
+            # If previously ERROR, promote back to UP and broadcast once.
             if event.event_type == "heartbeat":
                 promote = False
+                queue_changed = False
                 with self._lock:
                     info = self._replicas.get(input_addr)
                     if info is not None:
                         info.last_heartbeat = time()
+                        if event.queue_length is not None and info.queue_length != event.queue_length:
+                            info.queue_length = event.queue_length
+                            queue_changed = True
                         if info.status == StageStatus.ERROR:
                             info.status = StageStatus.UP
                             promote = True
-                if promote:
+                if promote or queue_changed:
                     self._schedule_broadcast()
                 return
 

@@ -111,7 +111,9 @@ class OmniCoordClientForStage:
 
         Wire format: input_addr, output_addr, stage_id, status, queue_length, event_type.
         For "update": includes status and queue_length from replica state.
-        For "heartbeat": status and queue_length are null.
+        For "heartbeat": includes the latest queue_length (refreshed by the
+        optional ``_on_heartbeat`` hook) so the coordinator can propagate
+        live load to load balancers between explicit ``update`` events.
 
         On send failure (ZMQError / RuntimeError), attempts to reconnect up
         to 3 times (5s sleep each) and retries the send once after a
