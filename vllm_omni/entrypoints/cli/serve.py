@@ -123,9 +123,7 @@ class OmniServeCommand(CLISubcommand):
                 LoadBalancingPolicy(omni_lb_policy)
             except ValueError as exc:
                 valid = ", ".join(p.value for p in LoadBalancingPolicy)
-                raise ValueError(
-                    f"--omni-lb-policy={omni_lb_policy!r} is not one of: {valid}"
-                ) from exc
+                raise ValueError(f"--omni-lb-policy={omni_lb_policy!r} is not one of: {valid}") from exc
 
         omni_heartbeat_timeout = getattr(args, "omni_heartbeat_timeout", None)
         if omni_heartbeat_timeout is not None and omni_heartbeat_timeout <= 0:
@@ -927,7 +925,8 @@ def run_headless(args: argparse.Namespace) -> None:
         )
 
     logger.info(
-        "[Headless] Launching %d omni replica(s) (vLLM dp_size_local=%d each) for stage %d via OmniMasterServer at %s:%d",
+        "[Headless] Launching %d omni replica(s) (vLLM dp_size_local=%d each) for stage %d "
+        "via OmniMasterServer at %s:%d",
         omni_dp_size_local,
         local_engine_count,
         stage_id,

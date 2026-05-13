@@ -82,16 +82,13 @@ class StageEngineCoreProc(EngineCoreProc):
         engine_core: StageEngineCoreProc | None = None
         coord_client: OmniCoordClientForStage | None = None
         try:
-            vllm_config: VllmConfig = kwargs["vllm_config"]
             # NOTE: previous revisions hardcoded data_parallel_size=1 here
             # (TODO referencing issue #984). The hardcoding has been removed
             # so the DP fields propagate through from the caller exactly
             # like upstream vLLM.
 
             stage_label = f"stage{omni_stage_id}" if omni_stage_id is not None else "noid"
-            set_process_title(
-                f"StageEngineCoreProc_{stage_label}_replica{omni_replica_id}_DP{dp_rank}"
-            )
+            set_process_title(f"StageEngineCoreProc_{stage_label}_replica{omni_replica_id}_DP{dp_rank}")
             decorate_logs()
 
             engine_core = StageEngineCoreProc(
@@ -105,9 +102,7 @@ class StageEngineCoreProc(EngineCoreProc):
             # runs unconditionally — there is no dp_rank-based gating.
             if omni_coordinator_address is not None:
                 if omni_stage_id is None:
-                    raise ValueError(
-                        "omni_stage_id must be provided when omni_coordinator_address is set"
-                    )
+                    raise ValueError("omni_stage_id must be provided when omni_coordinator_address is set")
                 addresses: EngineZmqAddresses = engine_core.addresses
                 if not addresses.inputs or not addresses.outputs:
                     raise RuntimeError(

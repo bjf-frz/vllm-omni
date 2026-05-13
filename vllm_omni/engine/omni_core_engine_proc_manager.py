@@ -117,8 +117,7 @@ class OmniCoreEngineProcManager(CoreEngineProcManager):
                     target=StageEngineCoreProc.run_stage_core,
                     name=(
                         f"StageEngineCoreProc_stage{omni_stage_id}"
-                        f"_replica{omni_replica_id}"
-                        + (f"_DP{global_index}" if is_dp else "")
+                        f"_replica{omni_replica_id}" + (f"_DP{global_index}" if is_dp else "")
                     ),
                     kwargs=common_kwargs
                     | {

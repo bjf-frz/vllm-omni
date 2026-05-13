@@ -39,9 +39,7 @@ class OmniCoordClientForHub:
 
         self._init_done.wait(timeout=5.0)
         if self._init_error:
-            raise RuntimeError(
-                f"Failed to connect to coordinator at {self._coord_zmq_addr}"
-            ) from self._init_error[0]
+            raise RuntimeError(f"Failed to connect to coordinator at {self._coord_zmq_addr}") from self._init_error[0]
 
     def _decode_replica_list(self, payload: dict[str, Any]) -> ReplicaList:
         """Convert a JSON-decoded dict into a :class:`ReplicaList`."""

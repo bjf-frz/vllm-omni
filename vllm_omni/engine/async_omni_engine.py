@@ -150,6 +150,7 @@ def _build_load_balancer_factory(policy: str) -> Callable[[], LoadBalancer]:
         return LeastQueueLengthBalancer
     raise ValueError(f"unhandled load balancing policy {normalized!r}")
 
+
 # Fields always populated by callers (via ``from_cli_args`` / ``asdict``) so
 # their presence as an override is never a surprise — suppress the
 # "override ignored" warning for these.
@@ -758,9 +759,7 @@ class AsyncOmniEngine:
 
         # LLM path
         if ctx.vllm_config is None or ctx.executor_class is None:
-            raise RuntimeError(
-                f"stage {stage_id} factory context is missing vllm_config / executor_class"
-            )
+            raise RuntimeError(f"stage {stage_id} factory context is missing vllm_config / executor_class")
 
         # The headless's StageEngineCoreProc subprocess calls
         # vllm.v1.engine.core.startup_handshake at boot and blocks until the
@@ -835,8 +834,7 @@ class AsyncOmniEngine:
             self.request_queue.sync_q.put_nowait(msg)
         except Exception:
             logger.exception(
-                "[AsyncOmniEngine] Failed to enqueue register_remote_replica "
-                "for stage=%d replica=%d",
+                "[AsyncOmniEngine] Failed to enqueue register_remote_replica for stage=%d replica=%d",
                 stage_id,
                 replica_id,
             )
