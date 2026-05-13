@@ -1,24 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 
 import zmq
 
-from .messages import InstanceEvent, StageStatus
+from .messages import ReplicaEvent, StageStatus
 
 logger = logging.getLogger(__name__)
 
 
 class OmniCoordClientForStage:
-    """Client used by stage instances to send events to OmniCoordinator.
+    """Client used by stage replicas to send events to OmniCoordinator.
 
     This client maintains a DEALER socket connected to OmniCoordinator's
-    ROUTER endpoint and sends JSON-encoded events describing instance status.
+    ROUTER endpoint and sends JSON-encoded events describing replica status.
     """
 
     def __init__(
@@ -49,6 +51,11 @@ class OmniCoordClientForStage:
         self._heartbeat_interval = 5.0
         self._stop_event = threading.Event()
         self._send_lock = threading.RLock()
+        # Optional hook invoked from the heartbeat thread before each
+        # heartbeat send. Stages set this to refresh ``queue_length`` (or any
+        # other field) just-in-time. Exceptions raised by the hook are
+        # suppressed and logged.
+        self._on_heartbeat: Callable[[], None] | None = None
 
         self._send_event("update")
 
@@ -100,10 +107,10 @@ class OmniCoordClientForStage:
         return False
 
     def _send_event(self, event_type: str) -> None:
-        """Send an InstanceEvent to OmniCoordinator.
+        """Send a ReplicaEvent to OmniCoordinator.
 
         Wire format: input_addr, output_addr, stage_id, status, queue_length, event_type.
-        For "update": includes status and queue_length from instance state.
+        For "update": includes status and queue_length from replica state.
         For "heartbeat": status and queue_length are null.
 
         On send failure (ZMQError / RuntimeError), attempts to reconnect up
@@ -114,7 +121,7 @@ class OmniCoordClientForStage:
             if self._closed:
                 raise RuntimeError("Client already closed")
 
-            event = InstanceEvent(
+            event = ReplicaEvent(
                 input_addr=self._input_addr,
                 output_addr=self._output_addr,
                 stage_id=self._stage_id,
@@ -150,7 +157,7 @@ class OmniCoordClientForStage:
         status: StageStatus | None = None,
         queue_length: int | None = None,
     ) -> None:
-        """Update instance information and notify OmniCoordinator.
+        """Update replica information and notify OmniCoordinator.
 
         At least one of ``status`` or ``queue_length`` must be provided.
         """
@@ -173,6 +180,15 @@ class OmniCoordClientForStage:
         while not self._stop_event.wait(timeout=self._heartbeat_interval):
             if self._closed:
                 break
+
+            # Invoke the optional pre-heartbeat hook so callers (e.g. the
+            # engine subprocess) can refresh ``queue_length`` from live state
+            # before the heartbeat is sent. Exceptions are swallowed so a
+            # buggy hook never breaks the heartbeat loop.
+            hook = self._on_heartbeat
+            if hook is not None:
+                with contextlib.suppress(Exception):
+                    hook()
 
             try:
                 self._send_event("heartbeat")

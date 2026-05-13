@@ -7,6 +7,7 @@ communicating with StageDiffusionClient via ZMQ (PUSH/PULL).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +31,7 @@ from vllm_omni.distributed.omni_connectors.utils.serialization import (
     OmniMsgpackDecoder,
     OmniMsgpackEncoder,
 )
+from vllm_omni.distributed.omni_coordinator import OmniCoordClientForStage
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -54,6 +56,19 @@ class StageDiffusionProc:
         self._engine: DiffusionEngine | None = None
         self._executor: ThreadPoolExecutor | None = None
         self._closed = False
+        # Set by ``run_loop`` to the live dispatch task dict so
+        # :attr:`queue_length` can report in-flight requests for the
+        # OmniCoordinator heartbeat hook.
+        self._active_tasks: dict[str, asyncio.Task] | None = None
+
+    @property
+    def queue_length(self) -> int:
+        """Number of in-flight diffusion requests.
+
+        Returns 0 before :meth:`run_loop` starts and after it exits.
+        """
+        tasks = self._active_tasks
+        return 0 if tasks is None else len(tasks)
 
     # ------------------------------------------------------------------
     # Initialization
@@ -309,6 +324,9 @@ class StageDiffusionProc:
         decoder = OmniMsgpackDecoder()
 
         tasks: dict[str, asyncio.Task] = {}
+        # Expose the live task dict so :attr:`queue_length` (used by the
+        # OmniCoordinator heartbeat hook) can read the in-flight count.
+        self._active_tasks = tasks
 
         async def _dispatch_request(
             request_id: str,
@@ -466,6 +484,7 @@ class StageDiffusionProc:
             if tasks:
                 await asyncio.gather(*tasks.values(), return_exceptions=True)
 
+            self._active_tasks = None
             request_socket.close()
             response_socket.close()
             ctx.term()
@@ -504,8 +523,22 @@ class StageDiffusionProc:
         handshake_address: str,
         request_address: str,
         response_address: str,
+        *,
+        omni_coordinator_address: str | None = None,
+        omni_stage_id: int | None = None,
+        omni_replica_id: int = 0,
     ) -> None:
-        """Entry point for the diffusion subprocess."""
+        """Entry point for the diffusion subprocess.
+
+        Omni-specific kwargs (mirroring :meth:`StageEngineCoreProc.run_stage_core`):
+          - ``omni_coordinator_address``: ROUTER address of the head-side
+            OmniCoordinator. When set, a :class:`OmniCoordClientForStage`
+            reports the diffusion replica's status + queue length.
+          - ``omni_stage_id``: logical stage id; required when
+            ``omni_coordinator_address`` is set.
+          - ``omni_replica_id``: cluster-unique replica id within the
+            stage (logging / metrics only).
+        """
         shutdown_requested = False
 
         def signal_handler(signum: int, frame: Any) -> None:
@@ -518,6 +551,7 @@ class StageDiffusionProc:
         signal.signal(signal.SIGINT, signal_handler)
 
         proc = cls(model, od_config)
+        coord_client: OmniCoordClientForStage | None = None
         try:
             proc.initialize()
 
@@ -529,6 +563,35 @@ class StageDiffusionProc:
             handshake_socket.close()
             handshake_ctx.term()
 
+            # Wire OmniCoordClientForStage *after* READY so that the head
+            # has bound its head-side request/response sockets — the
+            # address pair we report is the same pair this proc binds to
+            # (request/response addresses passed in).
+            if omni_coordinator_address is not None:
+                if omni_stage_id is None:
+                    raise ValueError(
+                        "omni_stage_id must be provided when omni_coordinator_address is set"
+                    )
+                coord_client = OmniCoordClientForStage(
+                    coord_zmq_addr=omni_coordinator_address,
+                    input_addr=request_address,
+                    output_addr=response_address,
+                    stage_id=int(omni_stage_id),
+                )
+
+                def _refresh_queue_length() -> None:
+                    coord_client._queue_length = proc.queue_length  # type: ignore[union-attr]
+
+                coord_client._on_heartbeat = _refresh_queue_length
+
+                logger.info(
+                    "StageDiffusionProc registered with OmniCoordinator "
+                    "(stage_id=%d replica_id=%d coord=%s)",
+                    omni_stage_id,
+                    omni_replica_id,
+                    omni_coordinator_address,
+                )
+
             # Run async event loop
             asyncio.run(proc.run_loop(request_address, response_address))
 
@@ -539,6 +602,9 @@ class StageDiffusionProc:
             logger.exception("StageDiffusionProc encountered a fatal error.")
             raise
         finally:
+            if coord_client is not None:
+                with contextlib.suppress(RuntimeError):
+                    coord_client.close()
             proc.close()
 
 
@@ -551,10 +617,17 @@ def spawn_diffusion_proc(
     handshake_address: str | None = None,
     request_address: str | None = None,
     response_address: str | None = None,
+    *,
+    omni_coordinator_address: str | None = None,
+    omni_stage_id: int | None = None,
+    omni_replica_id: int = 0,
 ) -> tuple[BaseProcess, str, str, str]:
     """Spawn a StageDiffusionProc subprocess.
 
     Returns ``(proc, handshake_address, request_address, response_address)``.
+
+    Pass ``omni_coordinator_address`` / ``omni_stage_id`` / ``omni_replica_id``
+    to have the subprocess publish heartbeats to an OmniCoordinator.
     """
     handshake_address = handshake_address or get_open_zmq_ipc_path()
     request_address = request_address or get_open_zmq_ipc_path()
@@ -570,6 +643,9 @@ def spawn_diffusion_proc(
             "handshake_address": handshake_address,
             "request_address": request_address,
             "response_address": response_address,
+            "omni_coordinator_address": omni_coordinator_address,
+            "omni_stage_id": omni_stage_id,
+            "omni_replica_id": omni_replica_id,
         },
     )
     proc.start()
