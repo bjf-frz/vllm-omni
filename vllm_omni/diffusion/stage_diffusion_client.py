@@ -124,6 +124,11 @@ class StageDiffusionClient(StageClientBase):
         self.engine_input_source = getattr(metadata, "engine_input_source", [])
         self._proc = proc
         self._owns_process = proc is not None
+        # Expose the ZMQ addresses on the instance so callers (e.g.
+        # ``StagePool._client_input_addr``) can identify the diffusion
+        # replica by its bound address.
+        self.request_address = request_address
+        self.response_address = response_address
 
         self._zmq_ctx = zmq.Context()
         self._request_socket = self._zmq_ctx.socket(zmq.PUSH)

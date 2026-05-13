@@ -479,8 +479,18 @@ def get_stage_devices_per_replica(stage_cfg: Any) -> int:
 
 def compute_replica_layout(
     stage_configs: Sequence[Any],
+    *,
+    allow_zero: bool = False,
 ) -> tuple[list[int], dict[int, list[str]]]:
     """Compute per-stage replica counts and device assignments.
+
+    Args:
+        stage_configs: per-stage config objects with a ``runtime`` sub-config
+            exposing ``num_replicas`` and ``devices``.
+        allow_zero: when True, ``num_replicas == 0`` is honored (used by
+            single-stage / head-distributed mode for non-self stages that
+            will be filled dynamically by remote registrations); when False
+            (default), the count is clamped to at least 1.
 
     Returns:
         replicas_per_stage: num_replicas per logical stage.
@@ -495,7 +505,9 @@ def compute_replica_layout(
             if hasattr(runtime_cfg, "get")
             else getattr(runtime_cfg, "num_replicas", 1)
         )
-        replicas_per_stage.append(max(1, num_replicas))
+        if num_replicas < 0:
+            raise ValueError(f"num_replicas must be >= 0, got {num_replicas}")
+        replicas_per_stage.append(num_replicas if allow_zero else max(1, num_replicas))
 
     replica_devices_map: dict[int, list[str]] = {}
     for stage_id, stage_cfg in enumerate(stage_configs):
