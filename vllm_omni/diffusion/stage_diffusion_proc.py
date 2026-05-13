@@ -569,9 +569,7 @@ class StageDiffusionProc:
             # (request/response addresses passed in).
             if omni_coordinator_address is not None:
                 if omni_stage_id is None:
-                    raise ValueError(
-                        "omni_stage_id must be provided when omni_coordinator_address is set"
-                    )
+                    raise ValueError("omni_stage_id must be provided when omni_coordinator_address is set")
                 coord_client = OmniCoordClientForStage(
                     coord_zmq_addr=omni_coordinator_address,
                     input_addr=request_address,
@@ -585,8 +583,7 @@ class StageDiffusionProc:
                 coord_client._on_heartbeat = _refresh_queue_length
 
                 logger.info(
-                    "StageDiffusionProc registered with OmniCoordinator "
-                    "(stage_id=%d replica_id=%d coord=%s)",
+                    "StageDiffusionProc registered with OmniCoordinator (stage_id=%d replica_id=%d coord=%s)",
                     omni_stage_id,
                     omni_replica_id,
                     omni_coordinator_address,

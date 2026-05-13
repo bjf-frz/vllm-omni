@@ -1350,8 +1350,7 @@ class Orchestrator:
         input_addr = StagePool._client_input_addr(client)
         if input_addr is None:
             raise RuntimeError(
-                f"remote replica factory for stage {stage_id} produced a client "
-                "without a discoverable input address"
+                f"remote replica factory for stage {stage_id} produced a client without a discoverable input address"
             )
         pool.add_client(input_addr, client)
         logger.info(
