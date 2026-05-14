@@ -737,7 +737,13 @@ def run_headless(args: argparse.Namespace) -> None:
             runtime_cfg.get("devices") if hasattr(runtime_cfg, "get") else getattr(runtime_cfg, "devices", None)
         )
     devices_per_replica = get_stage_devices_per_replica(stage_cfg)
-    if omni_dp_size_local > 1 and devices_str:
+    if devices_str:
+        # Always remap YAML's logical devices through setup_stage_devices,
+        # even for omni_dp_size_local==1. The launcher's CUDA_VISIBLE_DEVICES
+        # is dropped from the engine-subprocess env between vllm-serve and
+        # OmniCoreEngineProcManager.Process, so the worker would otherwise
+        # default cuda:0 to physical GPU 0 and collide with a co-located
+        # head on the same host (see hyi3_multi_host_1 reproducer).
         per_replica_devices: list[str | None] = split_devices_for_replicas(
             devices_str, omni_dp_size_local, devices_per_replica, stage_id
         )
