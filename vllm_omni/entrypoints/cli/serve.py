@@ -105,6 +105,12 @@ class OmniServeCommand(CLISubcommand):
         if args.stage_id is not None and (args.omni_master_address is None or args.omni_master_port is None):
             raise ValueError("--stage-id requires both --omni-master-address and --omni-master-port to be set")
 
+        # --omni-replica-address is only consulted in run_headless(); reject it
+        # on the head so a misconfigured launch fails loudly instead of being
+        # silently ignored.
+        if getattr(args, "omni_replica_address", None) is not None and not args.headless:
+            raise ValueError("--omni-replica-address requires --headless to be set")
+
         # --omni-dp-size-local is process-local. A value other than 1 only
         # makes sense when this process owns a stage (head or headless).
         omni_dp_size_local = getattr(args, "omni_dp_size_local", None)
@@ -278,6 +284,20 @@ class OmniServeCommand(CLISubcommand):
             "-omp",
             type=int,
             help="Port of the Omni orchestrator (master).",
+        )
+        omni_config_group.add_argument(
+            "--omni-replica-address",
+            "-ora",
+            type=str,
+            default=None,
+            help=(
+                "Local bind address (this host's IP) that the headless stage "
+                "advertises to the Omni master for its handshake/input/output "
+                "ZMQ sockets. If unset, auto-detected via a UDP-connect "
+                "routing probe against --omni-master-address. Override only "
+                "when the auto-detected IP is wrong (e.g. multi-NIC host "
+                "where the master is reachable on the wrong interface)."
+            ),
         )
         omni_config_group.add_argument(
             "--omni-dp-size-local",
@@ -662,6 +682,7 @@ def run_headless(args: argparse.Namespace) -> None:
     replica_id: int = args.replica_id
     omni_master_address: str | None = args.omni_master_address
     omni_master_port: int | None = args.omni_master_port
+    omni_replica_address: str | None = getattr(args, "omni_replica_address", None)
     omni_dp_size_local: int = max(1, int(getattr(args, "omni_dp_size_local", 1) or 1))
 
     if stage_id is None:
@@ -762,6 +783,7 @@ def run_headless(args: argparse.Namespace) -> None:
                     omni_stage_config=stage_cfg,
                     replica_id=req_replica_id,
                     return_full_response=True,
+                    replica_bind_address=omni_replica_address,
                 )
                 # Apply this replica's CUDA_VISIBLE_DEVICES (only when
                 # ``--omni-dp-size-local > 1`` and the YAML's stage devices
@@ -963,6 +985,7 @@ def run_headless(args: argparse.Namespace) -> None:
                 coordinator=coordinator,
                 replica_id=req_replica_id,
                 return_full_response=True,
+                replica_bind_address=omni_replica_address,
             )
             # Per-replica CUDA_VISIBLE_DEVICES, same pattern as the diffusion
             # branch above. OmniCoreEngineProcManager.__init__ spawns its

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import socket
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -451,6 +452,33 @@ class OmniMasterServer:
                 else:
                     alloc = self._stage_routes[(stage_id, replica_id)]
 
+            # Cross-host override: when the registering replica advertised its
+            # own bind address + ports, rewrite the StageAllocation so the
+            # subsequent reply (and any later head-side lookup of this route
+            # via ``_stage_routes``) uses addresses that are actually local to
+            # the replica's host. The master's pre-allocated ports (picked on
+            # the master's host) only work for co-located replicas.
+            new_bind_address = msg.get("replica_bind_address")
+            if new_bind_address:
+                hs_port = int(msg["replica_handshake_port"])
+                inp_port = int(msg["replica_input_port"])
+                out_port = int(msg["replica_output_port"])
+                alloc = StageAllocation(
+                    handshake_bind_address=f"tcp://{new_bind_address}:{hs_port}",
+                    handshake_connect_address=f"tcp://{new_bind_address}:{hs_port}",
+                    input_bind_address=f"tcp://{new_bind_address}:{inp_port}",
+                    input_connect_address=f"tcp://{new_bind_address}:{inp_port}",
+                    output_bind_address=f"tcp://{new_bind_address}:{out_port}",
+                    output_connect_address=f"tcp://{new_bind_address}:{out_port}",
+                )
+                self._stage_routes[(stage_id, replica_id)] = alloc
+                logger.info(
+                    "[OmniMasterServer] Stage %d replica %d advertised cross-host bind: %s",
+                    stage_id,
+                    replica_id,
+                    alloc.handshake_bind_address,
+                )
+
             # Mark the slot as filled *inside* the lock. Without this,
             # concurrent auto-assign registrations from a second headless
             # could call ``_next_free_replica_id`` between the lock
@@ -515,6 +543,26 @@ class StageRegistrationResponse:
     coordinator_router_address: str | None
 
 
+def _detect_local_bind_address(master_address: str, master_port: int) -> str:
+    """Return the local IP the kernel would use to reach the master.
+
+    Uses a connected UDP socket as a routing-table probe: ``connect()`` on
+    SOCK_DGRAM sends no packets but forces a route lookup, after which
+    ``getsockname()[0]`` exposes the source IP that an outbound packet to
+    ``(master_address, master_port)`` would carry. For a co-located master
+    this returns the loopback or eth0 IP (same effect as the legacy
+    ``self._address`` behaviour); for a remote master it returns the
+    NIC IP that's actually reachable from the master — which is exactly
+    the address the headless's per-stage ZMQ sockets must bind on.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((master_address, master_port))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
 def register_stage_with_omni_master(
     *,
     omni_master_address: str,
@@ -525,6 +573,7 @@ def register_stage_with_omni_master(
     return_addresses: bool = False,
     replica_id: int | None = 0,
     return_full_response: bool = False,
+    replica_bind_address: str | None = None,
 ) -> str | tuple[str, str, str] | StageRegistrationResponse:
     """Register a stage with the omni master server.
 
@@ -559,6 +608,24 @@ def register_stage_with_omni_master(
                 payload["coordinator_input"] = coordinator_input
                 payload["coordinator_output"] = coordinator_output
                 payload["frontend_stats_publish_address"] = coordinator.get_stats_publish_address()
+
+            # Always advertise THIS host's local bind address + 3 locally
+            # free ports so the master can root the per-stage socket
+            # allocation on the replica's own interface. For a co-located
+            # replica the detected IP matches the master's address and
+            # the override is a no-op semantically; for a cross-host
+            # replica it's what makes the headless's ROUTER bind succeed
+            # (otherwise the master would hand back ``tcp://<master_ip>:port``
+            # and ``zmq.bind`` would EADDRNOTAVAIL on the remote host).
+            if replica_bind_address is None:
+                replica_bind_address = _detect_local_bind_address(
+                    omni_master_address, omni_master_port
+                )
+            hs_port, inp_port, out_port = get_open_ports_list(count=3)
+            payload["replica_bind_address"] = replica_bind_address
+            payload["replica_handshake_port"] = hs_port
+            payload["replica_input_port"] = inp_port
+            payload["replica_output_port"] = out_port
 
             reg_sock.send(msgspec.msgpack.encode(payload))
             timeout_ms = _DEFAULT_STARTUP_TIMEOUT_S * 1_000
