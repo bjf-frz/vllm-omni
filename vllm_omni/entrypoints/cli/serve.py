@@ -991,6 +991,19 @@ def run_headless(args: argparse.Namespace) -> None:
                 replica_id=req_replica_id,
                 return_full_response=True,
                 replica_bind_address=omni_replica_address,
+                # LLM headless: the head binds *all* three sockets —
+                # handshake ROUTER (``connect_remote_engine_cores``),
+                # input ROUTER and output PULL (``CoreClient`` —
+                # ``make_zmq_socket`` defaults bind=True for PULL).
+                # The remote LLM worker is purely a connector: it
+                # opens 3 outbound TCP connections to the master's
+                # host. So the master must keep every address on
+                # its own host; rewriting any of them to this
+                # replica's NIC makes the head's ``bind`` go
+                # EADDRNOTAVAIL on a cross-host launch.
+                replica_binds_handshake=False,
+                replica_binds_input=False,
+                replica_binds_output=False,
             )
             # Per-replica CUDA_VISIBLE_DEVICES, same pattern as the diffusion
             # branch above. OmniCoreEngineProcManager.__init__ spawns its
