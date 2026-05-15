@@ -1317,6 +1317,8 @@ class AsyncOmniEngine:
             return None
 
         stage0_pool = stage_pools[0]
+        # TODO: Currently only supports the ar -> dit process.
+        # Future scenarios (e.g., dit -> ar) need to be added, which will require modifications here.
         if stage0_pool.stage_type == "diffusion" or self._stage_pool_replica_count(stage0_pool) <= 1:
             return None
 
