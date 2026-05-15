@@ -655,6 +655,11 @@ class AsyncOmniEngine:
 
         all_stage_ids: list[int] = []
         stage_replica_counts: dict[int, int] = {}
+        # Slots that the head itself will register (launch_mode == "local")
+        # — auto-assign on the master must not hand these out to remote
+        # headless registrations even within the race window before the
+        # head's own register_stage_with_omni_master call completes.
+        head_local_replicas: dict[int, list[int]] = {}
         seen_stage_ids: set[int] = set()
         for plan in stage_plans:
             stage_id = plan.configured_stage_id
@@ -665,6 +670,9 @@ class AsyncOmniEngine:
             seen_stage_ids.add(stage_id)
             all_stage_ids.append(stage_id)
             stage_replica_counts[stage_id] = len(plan.replicas)
+            local_rids = [rep.replica_id for rep in plan.replicas if rep.launch_mode == "local"]
+            if local_rids:
+                head_local_replicas[stage_id] = local_rids
 
         # Start the OmniCoordinator runtime first so its router address is
         # available to publish in every registration reply.
@@ -682,6 +690,7 @@ class AsyncOmniEngine:
             stage_replica_counts=stage_replica_counts,
             coordinator_router_address=self._coordinator_runtime.router_address,
             on_register=self._dispatch_master_register,
+            head_local_replicas=head_local_replicas,
         )
         self._omni_master_server.start()
         logger.info(

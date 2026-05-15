@@ -420,32 +420,61 @@ def split_devices_for_replicas(
     """Split a devices string into per-replica subsets.
 
     When ``num_replicas`` is 1, returns ``[devices_str]`` unchanged.
-    Otherwise, the total number of device IDs must equal
-    ``num_replicas * tp_size``; each replica gets ``tp_size`` consecutive
-    device IDs.
+    Otherwise, two YAML shapes are accepted:
 
-    Example::
+    1. **Legacy / pool mode** — ``len(devices) == num_replicas * tp_size``:
+       the string enumerates the full per-stage pool. Each replica gets
+       ``tp_size`` consecutive entries. The values are logical indices
+       into the launcher's ``CUDA_VISIBLE_DEVICES``.
 
-        split_devices_for_replicas("1,2,3,4", num_replicas=2, tp_size=2, stage_id=1)
-        # → ["1,2", "3,4"]
+       ``split_devices_for_replicas("1,2,3,4", 2, 2, 1) → ["1,2", "3,4"]``
+
+    2. **Template mode** — ``len(devices) == tp_size``: the YAML declares
+       a single per-replica template (the same shape one replica would
+       use), and is **dp-independent**. Each replica r gets the offsets
+       ``[r*tp_size + a for a in template]`` of the launcher's
+       ``CUDA_VISIBLE_DEVICES``. The template's entries must lie in
+       ``[0, tp_size)``.
+
+       ``split_devices_for_replicas("0,1", 2, 2, 1) → ["0,1", "2,3"]``
+       ``split_devices_for_replicas("0,1", 4, 2, 1) → ["0,1", "2,3", "4,5", "6,7"]``
+
+       This lets the same ``devices: "0,1"`` YAML work for any
+       ``--omni-dp-size-local``: the launcher's CVD scales, the YAML
+       does not.
+
+    Any other length raises ``ValueError`` (the two modes are
+    length-disjoint for ``num_replicas > 1``).
     """
     if num_replicas <= 1 or devices_str is None:
         return [devices_str] if devices_str is not None else [devices_str]
 
     device_list = [d.strip() for d in devices_str.split(",") if d.strip()]
-    required = num_replicas * tp_size
-    if len(device_list) != required:
-        raise ValueError(
-            f"Stage {stage_id}: num_replicas={num_replicas}, "
-            f"tensor_parallel_size={tp_size} requires "
-            f"{required} devices, got {len(device_list)}: {devices_str}"
-        )
 
-    result: list[str] = []
-    for r in range(num_replicas):
-        chunk = device_list[r * tp_size : (r + 1) * tp_size]
-        result.append(",".join(chunk))
-    return result
+    if len(device_list) == num_replicas * tp_size:
+        return [",".join(device_list[r * tp_size : (r + 1) * tp_size]) for r in range(num_replicas)]
+
+    if len(device_list) == tp_size:
+        try:
+            offsets = [int(a) for a in device_list]
+        except ValueError as e:
+            raise ValueError(
+                f"Stage {stage_id}: template-mode devices must be ints, got {devices_str!r}"
+            ) from e
+        bad = [a for a in offsets if not (0 <= a < tp_size)]
+        if bad:
+            raise ValueError(
+                f"Stage {stage_id}: template-mode device offset(s) {bad} "
+                f"out of range [0, {tp_size}); devices={devices_str!r}"
+            )
+        return [",".join(str(r * tp_size + a) for a in offsets) for r in range(num_replicas)]
+
+    raise ValueError(
+        f"Stage {stage_id}: devices={devices_str!r} has {len(device_list)} id(s); "
+        f"need either {tp_size} (template, dp-independent) or "
+        f"{num_replicas * tp_size} (pool / legacy). "
+        f"num_replicas={num_replicas}, tensor_parallel_size={tp_size}."
+    )
 
 
 def get_stage_tp_size(stage_cfg: Any) -> int:

@@ -222,8 +222,12 @@ class OmniServeCommand(CLISubcommand):
         omni_config_group.add_argument(
             "--replica-id",
             type=int,
-            default=0,
-            help="Replica id to register when launching a single headless stage.",
+            default=None,
+            help=(
+                "Deprecated and ignored — replica ids are auto-assigned by the "
+                "master server. Specifying this flag prints a warning and has "
+                "no effect."
+            ),
         )
         omni_config_group.add_argument(
             "--stage-init-timeout",
@@ -678,7 +682,6 @@ def run_headless(args: argparse.Namespace) -> None:
 
     model = args.model
     stage_id: int | None = args.stage_id
-    replica_id: int = args.replica_id
     omni_master_address: str | None = args.omni_master_address
     omni_master_port: int | None = args.omni_master_port
     omni_replica_address: str | None = getattr(args, "omni_replica_address", None)
@@ -686,8 +689,20 @@ def run_headless(args: argparse.Namespace) -> None:
 
     if stage_id is None:
         raise ValueError("--stage-id is required in headless mode")
-    if replica_id < 0:
-        raise ValueError("--replica-id must be >= 0 in headless mode")
+
+    # ``--replica-id`` is deprecated and ignored — replica ids are
+    # auto-assigned by ``OmniMasterServer`` so headless processes carry
+    # no knowledge of their per-replica id at launch time. Warn (don't
+    # error) when the operator still supplies it so existing launchers
+    # keep working with a single log line.
+    explicit_cli_keys: set[str] = getattr(args, "_cli_explicit_keys", set()) or set()
+    if "replica_id" in explicit_cli_keys:
+        logger.warning(
+            "[Headless] --replica-id is deprecated and ignored "
+            "(supplied value: %s). Replica ids are auto-assigned by the "
+            "master server.",
+            args.replica_id,
+        )
     if omni_master_address is None or omni_master_port is None:
         raise ValueError("--omni-master-address and --omni-master-port are required in headless mode")
     api_server_count = args.api_server_count or 0
@@ -776,17 +791,15 @@ def run_headless(args: argparse.Namespace) -> None:
         procs: list[Any] = []
         try:
             for _rep_idx in range(omni_dp_size_local):
-                # Auto-assign replica id when launching multiple replicas
-                # so independent headless invocations can coexist for the
-                # same stage. The user-supplied --replica-id is honored
-                # only when launching exactly one replica.
-                req_replica_id: int | None = replica_id if omni_dp_size_local == 1 else None
+                # Always auto-assign: headless processes carry no knowledge
+                # of their per-replica id and the master server is the sole
+                # authority on the per-stage id namespace.
                 response = register_stage_with_omni_master(
                     omni_master_address=omni_master_address,
                     omni_master_port=omni_master_port,
                     omni_stage_id=stage_id,
                     omni_stage_config=stage_cfg,
-                    replica_id=req_replica_id,
+                    replica_id=None,
                     return_full_response=True,
                     replica_bind_address=omni_replica_address,
                 )
@@ -945,9 +958,8 @@ def run_headless(args: argparse.Namespace) -> None:
             enable_wave_coordination=vllm_config.model_config.is_moe,
         )
         logger.info(
-            "[Headless] Started DP Coordinator process for stage %d replica %d (PID: %d)",
+            "[Headless] Started DP Coordinator process for stage %d (PID: %d)",
             stage_id,
-            replica_id,
             coordinator.proc.pid,
         )
 
@@ -981,14 +993,15 @@ def run_headless(args: argparse.Namespace) -> None:
 
     try:
         for _rep_idx in range(omni_dp_size_local):
-            req_replica_id: int | None = replica_id if omni_dp_size_local == 1 else None
+            # Always auto-assign: see the diffusion branch comment above
+            # for the rationale (headless owns no replica-id namespace).
             response = register_stage_with_omni_master(
                 omni_master_address=omni_master_address,
                 omni_master_port=omni_master_port,
                 omni_stage_id=stage_id,
                 omni_stage_config=stage_cfg,
                 coordinator=coordinator,
-                replica_id=req_replica_id,
+                replica_id=None,
                 return_full_response=True,
                 replica_bind_address=omni_replica_address,
                 # LLM headless: the head binds *all* three sockets —
@@ -1001,9 +1014,7 @@ def run_headless(args: argparse.Namespace) -> None:
                 # its own host; rewriting any of them to this
                 # replica's NIC makes the head's ``bind`` go
                 # EADDRNOTAVAIL on a cross-host launch.
-                replica_binds_handshake=False,
-                replica_binds_input=False,
-                replica_binds_output=False,
+                replica_binds_sockets=False,
             )
             # Per-replica CUDA_VISIBLE_DEVICES, same pattern as the diffusion
             # branch above. OmniCoreEngineProcManager.__init__ spawns its

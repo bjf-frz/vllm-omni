@@ -203,6 +203,32 @@ class TestOmniMasterServerAllocation:
         server = OmniMasterServer(master_address="127.0.0.1", master_port=15004, stage_ids=[3])
         assert server.get_allocation(3) is server._stage_routes[(3, 0)]
 
+    def test_next_free_replica_id_skips_head_local_slot_until_filled(self):
+        # Head pre-allocates slot (0, 0) for its own register_stage_with_omni_master
+        # call. A same-host headless that registers with auto-assign BEFORE the
+        # head's own registration must NOT be handed slot 0 — it should land on
+        # slot 1 instead. Without the head_local_replicas reservation,
+        # _next_free_replica_id would see (0, 0) absent from _stage_configs and
+        # return 0, colliding with the head's own bound sockets.
+        server = OmniMasterServer(
+            master_address="127.0.0.1",
+            master_port=15010,
+            stage_ids=[0],
+            head_local_replicas={0: [0]},
+        )
+        assert server._next_free_replica_id(0) == 1
+
+    def test_next_free_replica_id_uses_remote_slot_when_unowned(self):
+        # When the head pre-allocates a remote-only slot (the head's _initialize_*
+        # path waits on get_stage_config), auto-assign SHOULD fill it so the
+        # head's wait unblocks. This is the original behavior, preserved.
+        server = OmniMasterServer(
+            master_address="127.0.0.1",
+            master_port=15011,
+            stage_ids=[0],
+        )
+        assert server._next_free_replica_id(0) == 0
+
 
 # ---------------------------------------------------------------------------
 # OmniMasterServer registration flow
@@ -474,6 +500,8 @@ class TestSingleStageInitialization:
         engine._omni_master_address = "127.0.0.1"
         engine._omni_master_port = 26000
         engine._omni_master_server = None
+        engine._omni_heartbeat_timeout = 30.0
+        engine._coordinator_runtime = None
         engine.async_chunk = False
         engine.diffusion_batch_size = 2
         return engine
@@ -508,10 +536,16 @@ class TestSingleStageInitialization:
 
     def test_start_omni_master_server_uses_configured_stage_ids(self, mocker: MockerFixture):
         import vllm_omni.engine.async_omni_engine as engine_mod
+        from vllm_omni.distributed import omni_coordinator as omni_coord_mod
 
         engine = self._build_engine([], single_stage_mode=True, stage_id_filter=7)
         mock_oms = mocker.Mock(spec=OmniMasterServer)
         mocker.patch.object(engine_mod, "OmniMasterServer", return_value=mock_oms)
+        mocker.patch.object(
+            omni_coord_mod,
+            "OmniCoordinatorRuntime",
+            return_value=mocker.Mock(router_address="tcp://127.0.0.1:9999"),
+        )
 
         stage_plans = [
             _make_llm_plan(0, configured_stage_id=7, launch_mode="local"),
@@ -520,12 +554,16 @@ class TestSingleStageInitialization:
 
         engine._start_omni_master_server(stage_plans)
 
-        engine_mod.OmniMasterServer.assert_called_once_with(
-            master_address="127.0.0.1",
-            master_port=26000,
-            stage_ids=[7, 11],
-            stage_replica_counts={7: 1, 11: 1},
-        )
+        call_kwargs = engine_mod.OmniMasterServer.call_args.kwargs
+        assert call_kwargs["master_address"] == "127.0.0.1"
+        assert call_kwargs["master_port"] == 26000
+        assert call_kwargs["stage_ids"] == [7, 11]
+        assert call_kwargs["stage_replica_counts"] == {7: 1, 11: 1}
+        # head_local_replicas reserves slots that the head will register
+        # itself (launch_mode == "local"). Stage 11 is remote, so it must
+        # NOT appear in the head-owned set — that slot is for the headless
+        # to fill via auto-assign.
+        assert call_kwargs["head_local_replicas"] == {7: [0]}
         mock_oms.start.assert_called_once()
 
     def test_start_omni_master_server_duplicate_stage_ids_raise(self):

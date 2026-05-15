@@ -123,6 +123,7 @@ class OmniMasterServer:
         *,
         coordinator_router_address: str | None = None,
         on_register: OnRegisterCallback | None = None,
+        head_local_replicas: dict[int, list[int]] | None = None,
     ) -> None:
         self._address = master_address
         self._port = master_port
@@ -145,6 +146,16 @@ class OmniMasterServer:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         stage_replica_counts = dict(stage_replica_counts or {})
+
+        # Slots the *head* itself will fill via ``launch_omni_core_engines``
+        # / its own ``register_stage_with_omni_master`` call. Auto-assigning
+        # headless registrations must skip these even when they appear
+        # ``_stage_configs``-unfilled — otherwise a fast headless on the same
+        # host can race the head's own registration and steal slot 0.
+        self._head_local_slots: set[StageRoute] = set()
+        for sid, rids in (head_local_replicas or {}).items():
+            for rid in rids:
+                self._head_local_slots.add((int(sid), int(rid)))
 
         for sid in stage_ids:
             replica_count = int(stage_replica_counts.get(sid, 1))
@@ -225,19 +236,29 @@ class OmniMasterServer:
         pre-allocated ids — unblocks. Only when every pre-allocated slot for
         this stage has been filled do we allocate a fresh id.
 
+        Slots in ``_head_local_slots`` are reserved for the head's own
+        ``launch_omni_core_engines`` registration. Auto-assign must skip
+        them even when ``_stage_configs`` shows them unfilled — otherwise a
+        same-host headless that registers before the head's own
+        ``register_stage_with_omni_master`` call would steal slot 0.
+
         Without this, a headless contributor using ``--omni-dp-size-local > 1``
         (auto-assign mode) would skip past pre-allocated slot 0 and pick ids
         beyond ``num_replicas``, deadlocking the head's
         ``connect_remote_engine_cores`` wait.
         """
         # Pre-allocated slots that haven't received a registration yet are
-        # tracked by absence from ``_stage_configs``.
+        # tracked by absence from ``_stage_configs``. Head-owned slots are
+        # not auto-assignable.
         for sid, rid in sorted(self._stage_routes):
             if sid != stage_id:
                 continue
+            if (sid, rid) in self._head_local_slots:
+                continue
             if (sid, rid) not in self._stage_configs:
                 return rid
-        # Every pre-allocated slot is filled; allocate a fresh id.
+        # Every pre-allocated slot is filled (or head-owned); allocate a
+        # fresh id past the existing routes.
         used = {rid for (sid, rid) in self._stage_routes if sid == stage_id}
         rid = 0
         while rid in used:
@@ -474,56 +495,38 @@ class OmniMasterServer:
             #                 bind=True for PULL in ``make_zmq_socket``)
             #                 -> keep on master IP, worker TCP-connects
             #
-            # The registrant indicates which case via the three boolean
-            # flags in the payload: ``replica_binds_{handshake,input,output}``.
-            # All default to True (the diffusion / single-host case) so
-            # older callers still get the previous full-rewrite semantics.
-            # For LLM remote replicas, the master keeps every address on
-            # its own host and the remote worker establishes 3 outbound
+            # The registrant indicates which case via the boolean
+            # ``replica_binds_sockets`` payload flag. It defaults to
+            # True (the diffusion / single-host case) so older callers
+            # still get the previous full-rewrite semantics. For LLM
+            # remote replicas, the master keeps every address on its
+            # own host and the remote worker establishes 3 outbound
             # TCP connections to the master.
             new_bind_address = msg.get("replica_bind_address")
             if new_bind_address:
-                replica_binds_handshake = bool(msg.get("replica_binds_handshake", True))
-                replica_binds_input = bool(msg.get("replica_binds_input", True))
-                replica_binds_output = bool(msg.get("replica_binds_output", True))
-                if replica_binds_handshake:
+                replica_binds_sockets = bool(msg.get("replica_binds_sockets", True))
+                if replica_binds_sockets:
                     hs_port = int(msg["replica_handshake_port"])
-                    hs_bind_addr = f"tcp://{new_bind_address}:{hs_port}"
-                    hs_connect_addr = hs_bind_addr
-                else:
-                    hs_bind_addr = alloc.handshake_bind_address
-                    hs_connect_addr = alloc.handshake_connect_address
-                if replica_binds_input:
                     inp_port = int(msg["replica_input_port"])
-                    inp_bind_addr = f"tcp://{new_bind_address}:{inp_port}"
-                    inp_connect_addr = inp_bind_addr
-                else:
-                    inp_bind_addr = alloc.input_bind_address
-                    inp_connect_addr = alloc.input_connect_address
-                if replica_binds_output:
                     out_port = int(msg["replica_output_port"])
+                    hs_bind_addr = f"tcp://{new_bind_address}:{hs_port}"
+                    inp_bind_addr = f"tcp://{new_bind_address}:{inp_port}"
                     out_bind_addr = f"tcp://{new_bind_address}:{out_port}"
-                    out_connect_addr = out_bind_addr
-                else:
-                    out_bind_addr = alloc.output_bind_address
-                    out_connect_addr = alloc.output_connect_address
-                alloc = StageAllocation(
-                    handshake_bind_address=hs_bind_addr,
-                    handshake_connect_address=hs_connect_addr,
-                    input_bind_address=inp_bind_addr,
-                    input_connect_address=inp_connect_addr,
-                    output_bind_address=out_bind_addr,
-                    output_connect_address=out_connect_addr,
-                )
-                self._stage_routes[(stage_id, replica_id)] = alloc
+                    alloc = StageAllocation(
+                        handshake_bind_address=hs_bind_addr,
+                        handshake_connect_address=hs_bind_addr,
+                        input_bind_address=inp_bind_addr,
+                        input_connect_address=inp_bind_addr,
+                        output_bind_address=out_bind_addr,
+                        output_connect_address=out_bind_addr,
+                    )
+                    self._stage_routes[(stage_id, replica_id)] = alloc
                 logger.info(
                     "[OmniMasterServer] Stage %d replica %d cross-host bind "
-                    "(handshake on %s, input on %s, output on %s; replica_ip=%s)",
+                    "(sockets bound on %s; replica_ip=%s)",
                     stage_id,
                     replica_id,
-                    "replica" if replica_binds_handshake else "master",
-                    "replica" if replica_binds_input else "master",
-                    "replica" if replica_binds_output else "master",
+                    "replica" if replica_binds_sockets else "master",
                     new_bind_address,
                 )
 
@@ -622,9 +625,7 @@ def register_stage_with_omni_master(
     replica_id: int | None = 0,
     return_full_response: bool = False,
     replica_bind_address: str | None = None,
-    replica_binds_handshake: bool = True,
-    replica_binds_input: bool = True,
-    replica_binds_output: bool = True,
+    replica_binds_sockets: bool = True,
 ) -> str | tuple[str, str, str] | StageRegistrationResponse:
     """Register a stage with the omni master server.
 
@@ -678,16 +679,14 @@ def register_stage_with_omni_master(
             payload["replica_input_port"] = inp_port
             payload["replica_output_port"] = out_port
             # ``False`` only for LLM headless replicas: the head's
-            # ``connect_remote_engine_cores`` is the binder for that
+            # ``connect_remote_engine_cores`` is the binder for the
             # handshake ROUTER, and ``CoreClient.__init__`` binds the
-            # input ROUTER. The master must keep those addresses on
-            # the master's host so the head can ``bind`` them; the
-            # remote LLM workers TCP-connect across hosts. Only
-            # ``output`` is bound by the replica for LLM, so the
-            # output rewrite is unconditional.
-            payload["replica_binds_handshake"] = bool(replica_binds_handshake)
-            payload["replica_binds_input"] = bool(replica_binds_input)
-            payload["replica_binds_output"] = bool(replica_binds_output)
+            # input ROUTER and the output PULL (``make_zmq_socket``
+            # defaults bind=True for PULL). The master must keep all
+            # three addresses on the master's host so the head can
+            # ``bind`` them; the remote LLM worker TCP-connects across
+            # hosts on all three.
+            payload["replica_binds_sockets"] = bool(replica_binds_sockets)
 
             reg_sock.send(msgspec.msgpack.encode(payload))
             timeout_ms = _DEFAULT_STARTUP_TIMEOUT_S * 1_000
