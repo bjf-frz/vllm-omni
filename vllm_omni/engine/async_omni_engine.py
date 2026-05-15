@@ -875,6 +875,15 @@ class AsyncOmniEngine:
                 replica_id,
             )
 
+    def _initialize_janus_queues(self) -> None:
+        """Create orchestrator queues on the orchestrator event-loop thread."""
+        if self.request_queue is None:
+            self.request_queue = janus.Queue()
+        if self.output_queue is None:
+            self.output_queue = janus.Queue()
+        if self.rpc_output_queue is None:
+            self.rpc_output_queue = janus.Queue()
+
     def _initialize_llm_replica(
         self,
         plan: ReplicaInitPlan,
@@ -1415,6 +1424,7 @@ class AsyncOmniEngine:
         asyncio.set_event_loop(loop)
 
         async def _run_orchestrator() -> None:
+            self._initialize_janus_queues()
             self._initialize_stages(stage_init_timeout)
             pd_config = self._detect_pd_config()
             coordinator_pub_address: str | None = None
@@ -1424,6 +1434,9 @@ class AsyncOmniEngine:
                 coordinator_pub_address = self._coordinator_runtime.pub_address
                 load_balancer_factory = _build_load_balancer_factory(self._omni_lb_policy)
                 remote_replica_factory = self._build_remote_replica
+            assert self.request_queue is not None
+            assert self.output_queue is not None
+            assert self.rpc_output_queue is not None
             orchestrator = Orchestrator(
                 request_async_queue=self.request_queue.async_q,
                 output_async_queue=self.output_queue.async_q,

@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 from pytest_mock import MockerFixture
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
@@ -88,3 +89,22 @@ def test_build_add_request_message_with_resumable_streaming(mocker: MockerFixtur
     assert msg.type == "streaming_update"
     input_processor.process_inputs.assert_called_once()
     assert input_processor.process_inputs.call_args.kwargs["resumable"] is True
+
+
+def test_initialize_janus_queues_creates_all_queues_once():
+    engine = object.__new__(AsyncOmniEngine)
+    engine.request_queue = None
+    engine.output_queue = None
+    engine.rpc_output_queue = None
+
+    async def _run():
+        engine._initialize_janus_queues()
+        first_queues = (engine.request_queue, engine.output_queue, engine.rpc_output_queue)
+        engine._initialize_janus_queues()
+        assert (engine.request_queue, engine.output_queue, engine.rpc_output_queue) == first_queues
+        for q in first_queues:
+            assert q is not None
+            q.close()
+            await q.wait_closed()
+
+    asyncio.run(_run())
