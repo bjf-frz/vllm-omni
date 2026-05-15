@@ -8,6 +8,7 @@ busy loop in a subprocess, communicating with StageEngineCoreClient via ZMQ.
 from __future__ import annotations
 
 import contextlib
+import os
 import signal
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Any
@@ -90,6 +91,7 @@ class StageEngineCoreProc(EngineCoreProc):
             stage_label = f"stage{omni_stage_id}" if omni_stage_id is not None else "noid"
             set_process_title(f"StageEngineCoreProc_{stage_label}_replica{omni_replica_id}_DP{dp_rank}")
             decorate_logs()
+            os.environ["VLLM_OMNI_REPLICA_ID"] = str(max(int(omni_replica_id), 0))
 
             engine_core = StageEngineCoreProc(
                 *args,
