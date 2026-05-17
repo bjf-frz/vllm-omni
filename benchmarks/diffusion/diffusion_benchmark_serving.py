@@ -999,7 +999,7 @@ async def benchmark(args):
     metrics["dataset"] = args.dataset
     metrics["task"] = args.task
 
-    print("\n{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=60, c="="))
+    print("\n{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
 
     # Section 1: Configuration
     print("{:<40} {:<15}".format("Endpoint:", args.endpoint))

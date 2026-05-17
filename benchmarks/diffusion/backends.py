@@ -151,7 +151,7 @@ async def async_request_chat_completions(
     return output
 
 
-async def async_request_openai_images(
+async def async_request_openai_image_generations(
     input: RequestFuncInput,
     session: aiohttp.ClientSession,
     pbar: tqdm | None = None,
@@ -377,7 +377,7 @@ def endpoint_filename_token(value: str) -> str:
 backends_function_mapping = {
     "2i": {
         "/v1/chat/completions": (async_request_chat_completions, "/v1/chat/completions"),
-        "/v1/images/generations": (async_request_openai_images, "/v1/images/generations"),
+        "/v1/images/generations": (async_request_openai_image_generations, "/v1/images/generations"),
     },
     "2v": {
         "/v1/videos": (async_request_v1_videos, "/v1/videos"),

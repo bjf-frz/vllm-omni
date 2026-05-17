@@ -18,6 +18,8 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
 
+from benchmarks.diffusion.backends import normalize_endpoint
+
 LOGGER = logging.getLogger(__name__)
 
 GREY_BLOCK_FILL = PatternFill(start_color="D3D3D3", fill_type="solid")
@@ -528,8 +530,10 @@ def _process_diffusion_record(record: dict[str, Any]) -> dict[str, Any]:
     """Normalize a diffusion record by merging `result` and flattening stage metrics."""
     flat = record.copy()
     flat.update(flat.pop("result", {}))
-    if not flat.get("endpoint") and flat.get("backend"):
-        flat["endpoint"] = flat.get("backend")
+    if flat.get("endpoint"):
+        flat["endpoint"] = normalize_endpoint(flat["endpoint"])
+    elif flat.get("backend"):
+        flat["endpoint"] = normalize_endpoint(flat["backend"])
     flat.pop("backend", None)
     flat.pop("API Backend", None)
     flat = _flatten_stage_durations(flat)

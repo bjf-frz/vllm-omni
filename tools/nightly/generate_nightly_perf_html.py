@@ -14,6 +14,8 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
+from benchmarks.diffusion.backends import normalize_endpoint
+
 LOGGER = logging.getLogger(__name__)
 
 _RESULT_JSON_PREFIX = "result_test_"
@@ -222,8 +224,10 @@ def _iter_diffusion_json_records(input_dir: str) -> Iterable[dict[str, Any]]:
             result = flat.pop("result", None)
             if isinstance(result, dict):
                 flat.update(result)
-            if not flat.get("endpoint") and flat.get("backend"):
-                flat["endpoint"] = flat.get("backend")
+            if flat.get("endpoint"):
+                flat["endpoint"] = normalize_endpoint(flat["endpoint"])
+            elif flat.get("backend"):
+                flat["endpoint"] = normalize_endpoint(flat["backend"])
             flat.pop("backend", None)
             flat.pop("API Backend", None)
             if "date" not in flat or not flat.get("date"):
