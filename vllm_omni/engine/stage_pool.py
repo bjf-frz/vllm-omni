@@ -307,15 +307,16 @@ class StagePool:
         task: Task | None = None,
         *,
         affinity_request_id: str | None = None,
-    ) -> int:
+    ) -> int | None:
         """Synchronously pick and bind a replica before request preprocessing.
 
         The main-thread input preprocessing path cannot await :meth:`pick`, but
         multimodal cache UUID scoping needs to know the same replica that
-        :meth:`submit_initial` will later use. In distributed mode this mirrors
-        :meth:`pick` against the hub's cached replica snapshot and records the
-        selected input address in ``_affinity`` so the async submit path reuses
-        the route.
+        :meth:`submit_initial` will later use. In distributed mode this checks
+        the hub's cached replica snapshot once and records the selected input
+        address in ``_affinity`` so the async submit path reuses the route. If
+        no replica is currently serviceable, return ``None`` and let the async
+        submit-time router wait without blocking the caller.
         """
         if self._hub is None or self._lb is None:
             return self.select_replica_id(request_id, affinity_request_id=affinity_request_id)
@@ -336,19 +337,14 @@ class StagePool:
                     return replica_id
 
         task = task or Task(request_id=request_id)
-        deadline = _time.monotonic() + self.DISPATCH_WAIT_TIMEOUT_S
-        while True:
-            candidates = self._collect_serviceable_replicas()
-            if candidates:
-                lb_idx = self._lb.select(task, [rep for rep, _ in candidates])
-                replica_info, replica_id = candidates[lb_idx]
-                self._affinity[request_id] = replica_info.input_addr
-                return replica_id
+        candidates = self._collect_serviceable_replicas()
+        if not candidates:
+            return None
 
-            now = _time.monotonic()
-            if now >= deadline:
-                raise RuntimeError(f"no UP replica for stage {self.stage_id} after {self.DISPATCH_WAIT_TIMEOUT_S:.1f}s")
-            _time.sleep(min(self.DISPATCH_RETRY_INTERVAL_S, deadline - now))
+        lb_idx = self._lb.select(task, [rep for rep, _ in candidates])
+        replica_info, replica_id = candidates[lb_idx]
+        self._affinity[request_id] = replica_info.input_addr
+        return replica_id
 
     def _collect_serviceable_replicas(self) -> list[tuple[ReplicaInfo, int]]:
         """Return list of ``(ReplicaInfo, replica_id)`` for UP, attached replicas."""

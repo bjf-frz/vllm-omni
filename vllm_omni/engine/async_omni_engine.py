@@ -1571,6 +1571,13 @@ class AsyncOmniEngine:
                 )
                 return None
             replica_id = preselect_replica_id(request_id)
+            if replica_id is None:
+                logger.debug(
+                    "[AsyncOmniEngine] Skipping stage-0 multimodal cache scoping for distributed routing "
+                    "because no serviceable replica is available yet req=%s",
+                    request_id,
+                )
+                return None
         else:
             replica_id = stage0_pool.select_replica_id(request_id)
 

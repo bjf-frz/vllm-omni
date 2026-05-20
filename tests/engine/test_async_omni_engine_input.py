@@ -217,6 +217,47 @@ async def test_build_add_request_message_scopes_mm_uuids_to_distributed_stage0_r
     assert await stage_pool.pick("req-2") == 1
 
 
+def test_build_add_request_message_skips_distributed_mm_scope_when_no_replica(mocker: MockerFixture):
+    engine = object.__new__(AsyncOmniEngine)
+    params = SamplingParams(max_tokens=8)
+    engine.model = "test-model"
+    engine.default_sampling_params_list = [params]
+    engine.stage_metadata = [StageRuntimeInfo(final_output=False, final_output_type=None, stage_type="llm")]
+    engine.supported_tasks = ("generate",)
+
+    addr0 = "tcp://host-a:1000/input"
+    addr1 = "tcp://host-b:1000/input"
+    stage_pool = StagePool(0, [_FakeStageClient(addr0), _FakeStageClient(addr1)])
+    stage_pool.attach_hub(_FakeHub([]))
+    stage_pool.attach_load_balancer(_RoundRobinLB())
+    engine.stage_pools = [stage_pool]
+
+    seen_prompt: dict | None = None
+
+    def process_inputs(**kwargs):
+        nonlocal seen_prompt
+        seen_prompt = kwargs["prompt"]
+        return _make_engine_core_request(kwargs["request_id"])
+
+    input_processor = mocker.Mock()
+    input_processor.process_inputs.side_effect = process_inputs
+    engine.input_processor = input_processor
+
+    engine._build_add_request_message(
+        request_id="req-no-replica",
+        prompt={
+            "prompt": "describe",
+            "multi_modal_data": {"image": "same-image"},
+        },
+        sampling_params_list=[params],
+        final_stage_id=0,
+    )
+
+    assert seen_prompt is not None
+    assert "multi_modal_uuids" not in seen_prompt
+    assert stage_pool.get_bound_replica_id("req-no-replica") is None
+
+
 def test_stage_pool_replica_count_falls_back_to_clients():
     class PoolWithoutLiveNumReplicas:
         clients = [object(), None, object()]
