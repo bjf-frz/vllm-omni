@@ -1082,12 +1082,27 @@ class HunyuanImage3Pipeline(
 
                 # attention mask
                 mask_list = []
-                for attention_mask_i, position_ids_i in zip(
-                    model_kwargs["attention_mask"], updated_model_kwargs["position_ids"]
+                current_starts = timestep_position_ids.reshape(-1)
+                max_current_start = int(current_starts.max().item())
+                for attention_mask_i, position_ids_i, current_start_i in zip(
+                    model_kwargs["attention_mask"], updated_model_kwargs["position_ids"], current_starts
                 ):
-                    mask_list.append(
-                        torch.index_select(attention_mask_i, dim=1, index=position_ids_i.reshape(-1) - offset)
+                    query_mask = torch.index_select(attention_mask_i, dim=1, index=position_ids_i.reshape(-1) - offset)
+                    current_start = int(current_start_i.item())
+                    prefix_mask = torch.index_select(
+                        query_mask,
+                        dim=2,
+                        index=torch.arange(current_start, device=image_mask.device),
                     )
+                    if current_start < max_current_start:
+                        prefix_pad = query_mask.new_zeros(
+                            query_mask.shape[0],
+                            query_mask.shape[1],
+                            max_current_start - current_start,
+                        )
+                        prefix_mask = torch.cat([prefix_mask, prefix_pad], dim=2)
+                    current_mask = torch.index_select(query_mask, dim=2, index=position_ids_i.reshape(-1))
+                    mask_list.append(torch.cat([prefix_mask, current_mask], dim=2))
                 attention_mask = torch.stack(mask_list, dim=0)
                 updated_model_kwargs["attention_mask"] = attention_mask
                 updated_model_kwargs["gen_timestep_scatter_index"] = model_kwargs["gen_timestep_scatter_index"]
