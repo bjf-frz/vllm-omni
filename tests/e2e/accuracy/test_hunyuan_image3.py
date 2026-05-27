@@ -78,7 +78,7 @@ THRESHOLDS = {
     "cot_semantic_sim": 0.9,  # Full CoT semantic similarity
     # Image comparison
     "clip_score": 85,  # CLIP image semantic similarity
-    "ssim": 0.20,  # Structural similarity
+    "ssim": 0.26,  # Structural similarity
     "psnr": 11.0,  # Peak signal-to-noise ratio (dB)
 }
 
