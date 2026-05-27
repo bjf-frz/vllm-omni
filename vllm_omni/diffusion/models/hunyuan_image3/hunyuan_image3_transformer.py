@@ -911,8 +911,7 @@ class ImageKVCacheManager:
         ar_kv_len: int = 0,
     ) -> torch.Tensor:
         assert gen_timestep_scatter_index is not None, (
-            "`gen_timestep_scatter_index` is required to locate the generated "
-            "image timestep token for image KV reuse."
+            "`gen_timestep_scatter_index` is required to locate the generated image timestep token for image KV reuse."
         )
         return gen_timestep_scatter_index[:, -1].to(dtype=torch.long) + ar_kv_len
 
@@ -1919,8 +1918,7 @@ class HunyuanImagePreprocessor(nn.Module):
             )
             prompt_lens = gen_timestep_scatter_index[:, -1]
             assert torch.all(prompt_lens == prompt_lens[0]), (
-                "Sequence parallel image generation requires the generated "
-                "timestep position to match across the batch."
+                "Sequence parallel image generation requires the generated timestep position to match across the batch."
             )
             prompt_len = int(prompt_lens[0].item())
         else:
