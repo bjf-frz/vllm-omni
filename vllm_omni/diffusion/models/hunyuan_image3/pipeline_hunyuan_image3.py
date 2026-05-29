@@ -1276,11 +1276,12 @@ class HunyuanImage3Pipeline(
             )
         assert inputs_embeds is not None
         bsz, seq_len, n_embd = inputs_embeds.shape
+        num_tokens = bsz * seq_len
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         from vllm.forward_context import set_forward_context
 
-        with set_forward_context(None, self.vllm_config):
+        with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
             outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,

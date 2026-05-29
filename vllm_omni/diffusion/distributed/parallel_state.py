@@ -791,7 +791,16 @@ def initialize_model_parallel(
         backend=backend,
         parallel_mode="data",
     )
-    vllm_parallel_state._DP = _DP
+    # Keep Omni's DP group for diffusion-side rank/topology queries, but
+    # expose a vLLM GroupCoordinator to vLLM MoE kernels. DP+EP all-to-all
+    # uses get_dp_group().all_gatherv/reduce_scatterv, which are vLLM-only
+    # coordinator APIs.
+    vllm_parallel_state._DP = vllm_parallel_state.init_model_parallel_group(
+        rank_generator.get_ranks("dp"),
+        get_world_group().local_rank,
+        backend,
+        group_name="dp",
+    )
 
     global _CFG
     assert _CFG is None, "classifier_free_guidance group is already initialized"
@@ -849,11 +858,15 @@ def initialize_model_parallel(
     if enable_expert_parallel:
         od_config: OmniDiffusionConfig | None = get_forward_context().omni_diffusion_config
         if od_config and od_config.is_moe:
-            vllm_parallel_state._EP = init_model_parallel_group(
-                group_ranks=rank_generator.get_ranks("ep"),
-                local_rank=get_world_group().local_rank,
-                backend=backend,
-                parallel_mode="expert",
+            # vLLM MoE kernels access get_ep_group().device_communicator to
+            # build all-to-all prepare/finalize objects, especially when DP
+            # is mixed with EP. Use vLLM's coordinator for the EP group so it
+            # owns the expected device communicator/all2all manager.
+            vllm_parallel_state._EP = vllm_parallel_state.init_model_parallel_group(
+                rank_generator.get_ranks("ep"),
+                get_world_group().local_rank,
+                backend,
+                group_name="ep",
             )
         else:
             raise RuntimeError("Expert parallelism enabled for a non-MoE model ")
@@ -867,6 +880,9 @@ def destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
+    if vllm_parallel_state._DP:
+        vllm_parallel_state._DP.destroy()
+    vllm_parallel_state._DP = None
 
     global _CFG
     if _CFG:

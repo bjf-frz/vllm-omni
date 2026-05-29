@@ -37,6 +37,8 @@ from vllm_omni.diffusion.data import (
 )
 from vllm_omni.diffusion.distributed.parallel_state import (
     destroy_distributed_env,
+    get_data_parallel_rank,
+    get_data_parallel_world_size,
     init_distributed_environment,
     initialize_model_parallel,
 )
@@ -261,6 +263,13 @@ class DiffusionWorker:
                 hsdp_replicate_size=parallel_config.hsdp_replicate_size if parallel_config.use_hsdp else 1,
                 enable_expert_parallel=parallel_config.enable_expert_parallel,
             )
+            # vLLM MoE DP metadata uses ParallelConfig.data_parallel_rank to
+            # write per-rank token counts before an all-reduce. Omni owns the
+            # actual DP group construction here, so mirror the resolved rank
+            # back into vLLM's config after model-parallel initialization.
+            vllm_config.parallel_config.data_parallel_size = get_data_parallel_world_size()
+            vllm_config.parallel_config.data_parallel_rank = get_data_parallel_rank()
+            vllm_config.parallel_config.data_parallel_rank_local = get_data_parallel_rank()
             init_workspace_manager(self.device)
 
     def _create_profiler(self) -> WorkerProfiler | None:
