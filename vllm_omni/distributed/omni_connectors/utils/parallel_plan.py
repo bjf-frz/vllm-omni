@@ -12,7 +12,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-
 KVAxisRole = Literal["tensor_shard", "branch", "replica", "container"]
 KVReplicaFanoutGroup = Literal["ep"]
 DEFAULT_REPLICA_FANOUT_IDENTITY_AXES = ("tp", "pp", "ring", "ulysses", "cfg")
@@ -31,9 +30,7 @@ class ParallelAxis:
         if self.size <= 0:
             raise ValueError(f"Parallel axis {self.name!r} has invalid size={self.size}")
         if self.rank < 0 or self.rank >= self.size:
-            raise ValueError(
-                f"Parallel axis {self.name!r} has rank={self.rank} outside [0, {self.size})"
-            )
+            raise ValueError(f"Parallel axis {self.name!r} has rank={self.rank} outside [0, {self.size})")
 
     @property
     def active(self) -> bool:

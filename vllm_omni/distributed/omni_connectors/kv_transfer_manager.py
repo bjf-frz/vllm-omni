@@ -1407,6 +1407,7 @@ class OmniKVTransferManager:
         - TP inactive: legacy rank-0 receive then world broadcast
         """
         from vllm.distributed.parallel_state import get_ep_group
+
         from vllm_omni.diffusion.distributed.parallel_state import (
             get_cfg_group,
             get_classifier_free_guidance_rank,
@@ -1475,8 +1476,7 @@ class OmniKVTransferManager:
 
         if plan.independently_receives_remote:
             logger.info(
-                "KV receive plan=%s: rank independently receiving "
-                "(tp=%s/%s, pp=%s/%s, ring=%s/%s, ulysses=%s/%s)",
+                "KV receive plan=%s: rank independently receiving (tp=%s/%s, pp=%s/%s, ring=%s/%s, ulysses=%s/%s)",
                 plan.mode,
                 topo.local_rank,
                 topo.target_tp_size,
