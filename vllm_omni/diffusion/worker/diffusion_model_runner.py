@@ -97,9 +97,7 @@ class DiffusionModelRunner(OmniConnectorModelRunnerMixin):
         gen_device = self._seeded_generator_device(sampling_params)
         seed = sampling_params.seed
         if isinstance(seed, (list, tuple)):
-            sampling_params.generator = [
-                torch.Generator(device=gen_device).manual_seed(int(item)) for item in seed
-            ]
+            sampling_params.generator = [torch.Generator(device=gen_device).manual_seed(int(item)) for item in seed]
             return
 
         sampling_params.generator = torch.Generator(device=gen_device).manual_seed(seed)
