@@ -31,7 +31,7 @@ class ImageGenerationRequest(BaseModel):
     """
 
     # Required fields
-    prompt: str = Field(..., description="Text description of the desired image(s)")
+    prompt: str | list[str] = Field(..., description="Text description(s) of the desired image(s)")
     bot_task: str | None = Field(
         None,
         description="Task mode for the model (e.g., 'cot' enables chain-of-thought generation). "
@@ -85,7 +85,13 @@ class ImageGenerationRequest(BaseModel):
         return validate_layered_layers(v)
 
     # vllm-omni extensions for diffusion control
-    negative_prompt: str | None = Field(default=None, description="Text describing what to avoid in the image")
+    negative_prompt: str | list[str] | None = Field(
+        default=None,
+        description=(
+            "Text describing what to avoid in the image. When prompt is a list, "
+            "a string is shared by all prompts and a list is matched item-by-item."
+        ),
+    )
     system_prompt: str | None = Field(
         default=None, description="Custom system prompt. Used when --use_system_prompt is custom"
     )
