@@ -135,6 +135,13 @@ class ImageGenerationRequest(BaseModel):
             "to each prompt and a list is matched item-by-item."
         ),
     )
+    flow_shift: float | None = Field(
+        default=None, description="Scheduler flow_shift (sigma shift) for flow-matching diffusion models."
+    )
+    extra_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional model-specific parameters passed directly to the model's extra_args.",
+    )
     generator_device: str | None = Field(
         default=None,
         description="Device for the seeded torch.Generator (e.g. 'cpu', 'cuda'). Defaults to the runner's device.",
