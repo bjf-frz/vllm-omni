@@ -594,6 +594,7 @@ def test_generate_images_batch_prompts_single_stage(test_client):
         json={
             "prompt": ["a cat", "a dog"],
             "negative_prompt": ["blurry", "low quality"],
+            "seed": [200, 201],
             "n": 2,
             "size": "512x512",
         },
@@ -623,6 +624,7 @@ def test_generate_images_batch_prompts_single_stage(test_client):
     assert engine.captured_sampling_params_list[0].num_outputs_per_prompt == 2
     assert engine.captured_sampling_params_list[0].height == 512
     assert engine.captured_sampling_params_list[0].width == 512
+    assert engine.captured_sampling_params_list[0].seed == (200, 200, 201, 201)
 
 
 def test_generate_images_batch_prompts_rejects_mismatched_negative_prompt(test_client):
@@ -635,6 +637,33 @@ def test_generate_images_batch_prompts_rejects_mismatched_negative_prompt(test_c
     )
     assert response.status_code == 400
     assert "negative_prompt list length" in response.json()["detail"]
+
+
+def test_generate_images_batch_prompts_broadcasts_int_seed(test_client):
+    response = test_client.post(
+        "/v1/images/generations",
+        json={
+            "prompt": ["a cat", "a dog"],
+            "seed": 200,
+        },
+    )
+    assert response.status_code == 200
+
+    engine = test_client.app.state.engine_client
+    assert engine.captured_sampling_params_list[0].seed == (200, 200)
+
+
+def test_generate_images_batch_prompts_rejects_mismatched_seed(test_client):
+    response = test_client.post(
+        "/v1/images/generations",
+        json={
+            "prompt": ["a cat", "a dog"],
+            "seed": [200, 201, 202],
+            "n": 2,
+        },
+    )
+    assert response.status_code == 400
+    assert "seed list length" in response.json()["detail"]
 
 
 def test_generate_images_async_omni_sampling_params(async_omni_test_client):

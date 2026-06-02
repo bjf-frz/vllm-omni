@@ -174,6 +174,41 @@ def _normalize_image_generation_negative_prompts(
     return list(negative_prompt)
 
 
+def _normalize_image_generation_seed(
+    seed: int | list[int] | None,
+    *,
+    prompt_count: int,
+    num_outputs_per_prompt: int,
+) -> int | tuple[int, ...] | None:
+    if seed is None:
+        return seed
+
+    sample_count = prompt_count * num_outputs_per_prompt
+    if isinstance(seed, int):
+        if prompt_count == 1:
+            return seed
+        return tuple(seed for _ in range(sample_count))
+
+    if not seed:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="seed list must contain at least one item.",
+        )
+
+    if len(seed) == prompt_count:
+        return tuple(item for item in seed for _ in range(num_outputs_per_prompt))
+    if len(seed) == sample_count:
+        return tuple(seed)
+
+    raise HTTPException(
+        status_code=HTTPStatus.BAD_REQUEST.value,
+        detail=(
+            "seed list length must match prompt list length "
+            f"or total sample count ({len(seed)} != {prompt_count} or {sample_count})."
+        ),
+    )
+
+
 def _build_image_generation_prompt_payload(
     request: ImageGenerationRequest,
     *,
@@ -1644,6 +1679,11 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
                     status_code=HTTPStatus.BAD_REQUEST.value,
                     detail="Batched image prompts are only supported for single-stage diffusion pipelines.",
                 )
+            if isinstance(request.seed, list):
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                    detail="Batched image seeds are only supported for single-stage diffusion pipelines.",
+                )
             chat_handler = getattr(raw_request.app.state, "openai_serving_chat", None)
             if chat_handler is None:
                 logger.warning("openai_serving_chat is not initialized for multi-stage /v1/images/generations")
@@ -1730,6 +1770,12 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
         app_state_args = getattr(raw_request.app.state, "args", None)
         _check_max_generated_image_size(app_state_args, width, height)
         prompt = _build_image_generation_prompt_payload(request, width=width, height=height)
+        prompt_count = len(prompt) if isinstance(prompt, list) else 1
+        effective_seed = _normalize_image_generation_seed(
+            request.seed,
+            prompt_count=prompt_count,
+            num_outputs_per_prompt=request.n,
+        )
 
         _update_if_not_none(gen_params, "width", width)
         _update_if_not_none(gen_params, "height", height)
@@ -1743,7 +1789,9 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
         # This fixes issues where using the default global generator
         # might produce blurry images in some environments.
         _update_if_not_none(
-            gen_params, "seed", request.seed if request.seed is not None else random.randint(0, MAX_UINT32_SEED)
+            gen_params,
+            "seed",
+            effective_seed if effective_seed is not None else random.randint(0, MAX_UINT32_SEED),
         )
         _update_if_not_none(gen_params, "generator_device", request.generator_device)
         _update_if_not_none(gen_params, "layers", request.layers)
@@ -1751,7 +1799,6 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
         request_id = f"img_gen-{random_uuid()}"
         raw_request.state.request_metadata = RequestResponseMetadata(request_id=request_id)
 
-        prompt_count = len(prompt) if isinstance(prompt, list) else 1
         logger.debug(
             "Generating %d image(s) from %d prompt(s) %s",
             prompt_count * request.n,

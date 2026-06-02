@@ -128,7 +128,13 @@ class ImageGenerationRequest(BaseModel):
         le=20.0,
         description="True CFG scale (model-specific parameter, may be ignored if not supported)",
     )
-    seed: int | None = Field(default=None, description="Random seed for reproducibility")
+    seed: int | list[int] | None = Field(
+        default=None,
+        description=(
+            "Random seed for reproducibility. When prompt is a list, an integer is broadcast "
+            "to each prompt and a list is matched item-by-item."
+        ),
+    )
     generator_device: str | None = Field(
         default=None,
         description="Device for the seeded torch.Generator (e.g. 'cpu', 'cuda'). Defaults to the runner's device.",
