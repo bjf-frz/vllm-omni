@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import os
-import pickle
 import socket
 import traceback
 from datetime import timedelta
@@ -40,21 +39,12 @@ class _CPUObjectGroup:
         self.ranks = list(range(world_size))
 
     def send_object(self, obj: Any, dst: int) -> None:
-        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
-        size_tensor = torch.tensor([object_tensor.numel()], dtype=torch.long)
-
-        dist.send(size_tensor, dst=self.ranks[dst], group=self.cpu_group)
-        dist.send(object_tensor, dst=self.ranks[dst], group=self.cpu_group)
+        dist.send_object_list([obj], dst=self.ranks[dst], group=self.cpu_group)
 
     def recv_object(self, src: int) -> Any:
-        size_tensor = torch.empty(1, dtype=torch.long)
-
-        size_sender_rank = dist.recv(size_tensor, src=self.ranks[src], group=self.cpu_group)
-        object_tensor = torch.empty(size_tensor.item(), dtype=torch.uint8)
-        object_sender_rank = dist.recv(object_tensor, src=self.ranks[src], group=self.cpu_group)
-
-        assert object_sender_rank == size_sender_rank
-        return pickle.loads(object_tensor.numpy().tobytes())
+        objects: list[Any] = [None]
+        dist.recv_object_list(objects, src=self.ranks[src], group=self.cpu_group)
+        return objects[0]
 
 
 def _find_free_port() -> int:
@@ -180,8 +170,7 @@ def test_replica_fanout_runtime_pairs_owners_and_sends_none_sentinel():
     ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()
     processes = [
-        ctx.Process(target=_fanout_worker, args=(rank, world_size, port, result_queue))
-        for rank in range(world_size)
+        ctx.Process(target=_fanout_worker, args=(rank, world_size, port, result_queue)) for rank in range(world_size)
     ]
 
     for process in processes:
