@@ -15,6 +15,18 @@ from typing import Literal
 KVAxisRole = Literal["tensor_shard", "branch", "replica", "container"]
 KVReplicaFanoutGroup = Literal["ep"]
 DEFAULT_REPLICA_FANOUT_IDENTITY_AXES = ("tp", "pp", "ring", "ulysses", "cfg")
+DEFAULT_CONNECTOR_PORT_AXIS_ORDER = (
+    "tp",
+    "pp",
+    "cfg",
+    "ulysses",
+    "ring",
+    "sp",
+    "ep",
+    "fs",
+    "vae_patch",
+)
+CONNECTOR_PORT_EXCLUDED_AXES = frozenset({"dp"})
 
 
 @dataclass(frozen=True)
@@ -71,6 +83,57 @@ class KVParallelRankCoord:
     @property
     def pp_sharded(self) -> bool:
         return self.size("pp") > 1
+
+
+def auto_connector_port_axes(coord: KVParallelRankCoord) -> tuple[ParallelAxis, ...]:
+    """Return active non-DP axes that should index connector endpoint ports.
+
+    DP is intentionally excluded because the orchestrator owns replica-level
+    placement and should provide a separate port list per replica.  SP is a
+    container for Ulysses and Ring; include SP only as a compatibility fallback
+    when neither Ulysses nor Ring is exposed as an active axis.
+    """
+    ulysses_or_ring_active = coord.size("ulysses") > 1 or coord.size("ring") > 1
+    axes: list[ParallelAxis] = []
+    for axis_name in DEFAULT_CONNECTOR_PORT_AXIS_ORDER:
+        if axis_name in CONNECTOR_PORT_EXCLUDED_AXES:
+            continue
+        if axis_name == "sp" and ulysses_or_ring_active:
+            continue
+        axis = coord.axis(axis_name)
+        if axis.active:
+            axes.append(axis)
+    return tuple(axes)
+
+
+def flatten_parallel_coord(
+    coord: KVParallelRankCoord,
+    axes: tuple[ParallelAxis, ...] | None = None,
+) -> tuple[int, int, tuple[str, ...]]:
+    """Flatten selected coordinate axes into a stable row-major rank index."""
+    selected_axes = auto_connector_port_axes(coord) if axes is None else axes
+    rank = 0
+    world_size = 1
+    names: list[str] = []
+    for axis in selected_axes:
+        rank = rank * axis.size + axis.rank
+        world_size *= axis.size
+        names.append(axis.name)
+    return rank, world_size, tuple(names)
+
+
+def select_connector_port_from_list(
+    port_list: list[int] | tuple[int, ...],
+    coord: KVParallelRankCoord,
+) -> tuple[int, int, tuple[str, ...]]:
+    """Select a connector port from a list using the auto-selected axes."""
+    index, world_size, axes = flatten_parallel_coord(coord)
+    if len(port_list) < world_size:
+        raise ValueError(
+            f"connector port list has {len(port_list)} entries, "
+            f"but selected axes {axes} require at least {world_size}"
+        )
+    return int(port_list[index]), index, axes
 
 
 @dataclass(frozen=True)

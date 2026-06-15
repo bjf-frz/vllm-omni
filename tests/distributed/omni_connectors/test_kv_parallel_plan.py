@@ -7,7 +7,10 @@ import pytest
 from vllm_omni.distributed.omni_connectors.utils.parallel_plan import (
     KVParallelRankCoord,
     ParallelAxis,
+    auto_connector_port_axes,
     build_kv_receive_distribution_plan,
+    flatten_parallel_coord,
+    select_connector_port_from_list,
 )
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -134,3 +137,43 @@ def test_replica_fanout_identity_tracks_kv_sharding_axes():
     assert base.replica_fanout_identity == different_ep.replica_fanout_identity
     assert base.replica_fanout_identity != different_tp.replica_fanout_identity
     assert base.replica_fanout_identity != different_cfg.replica_fanout_identity
+
+
+def test_connector_port_axes_include_active_non_dp_dimensions():
+    coord = _coord(
+        tp_size=2,
+        tp_rank=1,
+        cfg_size=2,
+        cfg_rank=1,
+        sp_size=4,
+        sp_rank=3,
+        ulysses_size=2,
+        ulysses_rank=1,
+        ring_size=2,
+        ring_rank=0,
+        ep_size=2,
+        ep_rank=1,
+    )
+
+    axes = auto_connector_port_axes(coord)
+    assert tuple(axis.name for axis in axes) == ("tp", "cfg", "ulysses", "ring", "ep")
+
+    rank, world_size, axis_names = flatten_parallel_coord(coord, axes)
+    assert axis_names == ("tp", "cfg", "ulysses", "ring", "ep")
+    assert world_size == 32
+    assert rank == 29
+
+    port, port_rank, port_axes = select_connector_port_from_list(list(range(10000, 10032)), coord)
+    assert port_rank == rank
+    assert port_axes == axis_names
+    assert port == 10029
+
+
+def test_connector_port_axes_use_sp_only_when_ulysses_and_ring_are_absent():
+    coord = _coord(sp_size=2, sp_rank=1)
+
+    rank, world_size, axis_names = flatten_parallel_coord(coord)
+
+    assert axis_names == ("sp",)
+    assert world_size == 2
+    assert rank == 1

@@ -37,6 +37,7 @@ from .utils.parallel_plan import (
     KVReceiveDistributionPlan,
     ParallelAxis,
     build_kv_receive_distribution_plan,
+    select_connector_port_from_list,
 )
 
 logger = init_logger(__name__)
@@ -341,6 +342,7 @@ class OmniKVTransferManager:
         # per-rank metadata for heterogeneous TP without querying a registry.
         self._sender_base_host: str | None = None
         self._sender_base_zmq_port: int | None = None
+        self._sender_zmq_port_list: list[int] | None = None
 
         if config.need_send_cache and config.connector_config:
             try:
@@ -431,12 +433,26 @@ class OmniKVTransferManager:
                         except (TypeError, ValueError):
                             stage_int = 0
                         replica_id = get_omni_replica_id()
-                        zmq_port = kv_zmq_port(
-                            base_port,
-                            stage_int,
-                            self._tp_topo.local_rank,
-                            replica_id=replica_id,
-                        )
+                        port_list = self._coerce_port_list(c_extra.get("zmq_port_list") or c_extra.get("port_list"))
+                        if port_list:
+                            coord = self._build_connector_port_coord(
+                                tp_size=self._tp_topo.source_tp_size,
+                                tp_rank=self._tp_topo.local_rank,
+                            )
+                            zmq_port, port_rank, port_axes = select_connector_port_from_list(port_list, coord)
+                            logger.info(
+                                "Selected KV sender port %s from list index=%s axes=%s",
+                                zmq_port,
+                                port_rank,
+                                port_axes,
+                            )
+                        else:
+                            zmq_port = kv_zmq_port(
+                                base_port,
+                                stage_int,
+                                self._tp_topo.local_rank,
+                                replica_id=replica_id,
+                            )
 
                         if self.config.need_send_cache:
                             c_extra["role"] = "sender"
@@ -464,6 +480,117 @@ class OmniKVTransferManager:
         return self._connector if self._connector else None
 
     get_connector = property(lambda self: self.connector)
+
+    @staticmethod
+    def _coerce_port_list(raw_ports: Any) -> list[int] | None:
+        if raw_ports is None:
+            return None
+        if isinstance(raw_ports, str):
+            try:
+                parsed = json.loads(raw_ports)
+            except json.JSONDecodeError:
+                parsed = [part.strip() for part in raw_ports.split(",") if part.strip()]
+            raw_ports = parsed
+        if not isinstance(raw_ports, (list, tuple)):
+            return None
+        ports: list[int] = []
+        for idx, raw_port in enumerate(raw_ports):
+            ports.append(expand_env_int(raw_port, f"zmq_port_list[{idx}]"))
+        return ports
+
+    def _build_connector_port_coord(self, *, tp_size: int, tp_rank: int) -> KVParallelRankCoord:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        from vllm_omni.diffusion.distributed.parallel_state import (
+            get_classifier_free_guidance_rank,
+            get_classifier_free_guidance_world_size,
+            get_data_parallel_rank,
+            get_data_parallel_world_size,
+            get_fully_shard_rank,
+            get_fully_shard_world_size,
+            get_pipeline_parallel_rank,
+            get_pipeline_parallel_world_size,
+            get_ring_parallel_rank,
+            get_ring_parallel_world_size,
+            get_sequence_parallel_rank,
+            get_sequence_parallel_world_size,
+            get_ulysses_parallel_rank,
+            get_ulysses_parallel_world_size,
+        )
+
+        ep_group = self._safe_parallel_group(get_ep_group)
+        return KVParallelRankCoord(
+            axes=(
+                ParallelAxis("tp", max(int(tp_size), 1), int(tp_rank), "tensor_shard"),
+                ParallelAxis(
+                    "pp",
+                    self._safe_parallel_int(get_pipeline_parallel_world_size),
+                    self._safe_parallel_int(get_pipeline_parallel_rank, 0),
+                    "tensor_shard",
+                ),
+                ParallelAxis(
+                    "cfg",
+                    self._safe_parallel_int(get_classifier_free_guidance_world_size),
+                    self._safe_parallel_int(get_classifier_free_guidance_rank, 0),
+                    "branch",
+                ),
+                ParallelAxis(
+                    "ulysses",
+                    self._safe_parallel_int(get_ulysses_parallel_world_size),
+                    self._safe_parallel_int(get_ulysses_parallel_rank, 0),
+                    "tensor_shard",
+                ),
+                ParallelAxis(
+                    "ring",
+                    self._safe_parallel_int(get_ring_parallel_world_size),
+                    self._safe_parallel_int(get_ring_parallel_rank, 0),
+                    "tensor_shard",
+                ),
+                ParallelAxis(
+                    "sp",
+                    self._safe_parallel_int(get_sequence_parallel_world_size),
+                    self._safe_parallel_int(get_sequence_parallel_rank, 0),
+                    "container",
+                ),
+                ParallelAxis(
+                    "dp",
+                    self._safe_parallel_int(get_data_parallel_world_size),
+                    self._safe_parallel_int(get_data_parallel_rank, 0),
+                    "replica",
+                ),
+                ParallelAxis("ep", self._group_world_size(ep_group), self._group_rank(ep_group), "replica"),
+                ParallelAxis(
+                    "fs",
+                    self._safe_parallel_int(get_fully_shard_world_size),
+                    self._safe_parallel_int(get_fully_shard_rank, 0),
+                    "tensor_shard",
+                ),
+            )
+        )
+
+    def _sender_port_for_source_rank(self, from_rank: int) -> int | None:
+        if self._sender_zmq_port_list:
+            try:
+                coord = self._build_connector_port_coord(
+                    tp_size=self._tp_topo.source_tp_size,
+                    tp_rank=from_rank,
+                )
+                port, port_rank, port_axes = select_connector_port_from_list(self._sender_zmq_port_list, coord)
+                logger.debug(
+                    "Selected KV source port %s from list index=%s axes=%s for source_rank=%s",
+                    port,
+                    port_rank,
+                    port_axes,
+                    from_rank,
+                )
+                return port
+            except Exception:
+                logger.exception("Failed to select KV source port from sender port list")
+                return None
+
+        if self._sender_base_zmq_port is None:
+            return None
+        return self._sender_base_zmq_port + from_rank * KV_RANK_PORT_STRIDE
 
     def _resolve_sender_info(
         self, sender_info: dict[str, Any], sender_stage_id: str | int | None = None
@@ -695,9 +822,9 @@ class OmniKVTransferManager:
     def update_sender_info(self, sender_info: dict[str, Any], sender_stage_id: str | int | None = None) -> None:
         """Update receiver-side sender info before loading remote KV cache.
 
-        The orchestrator always reports rank-0's ZMQ port.  When TP > 1 the
-        receiver must offset the port so that each TP rank connects to the
-        corresponding sender rank's port.
+        The orchestrator may report either rank-0's ZMQ port or an explicit
+        ZMQ port list.  When no list is present, the receiver preserves the
+        legacy rank-stride offset behavior.
 
         The base host/port are also stored so that the receive path can
         construct per-rank metadata for heterogeneous TP scenarios.
@@ -712,20 +839,31 @@ class OmniKVTransferManager:
 
         sender_host = actual_info.get("host")
         base_zmq_port = actual_info.get("zmq_port")
+        sender_port_list = self._coerce_port_list(
+            actual_info.get("zmq_port_list")
+            or actual_info.get("sender_zmq_port_list")
+            or actual_info.get("port_list")
+        )
 
         # Store base sender info for per-rank metadata construction.
         self._sender_base_host = sender_host
+        self._sender_zmq_port_list = sender_port_list
         if base_zmq_port is not None:
             self._sender_base_zmq_port = int(base_zmq_port)
 
         # --- Default sender: offset to match this receiver's corresponding sender rank ---
         zmq_port = base_zmq_port
-        if zmq_port is not None and self._tp_topo.local_rank > 0:
+        if sender_port_list:
+            source_rank = min(self._tp_topo.local_rank, self._tp_topo.source_tp_size - 1)
+            zmq_port = self._sender_port_for_source_rank(source_rank)
+        elif zmq_port is not None and self._tp_topo.local_rank > 0:
             zmq_port = int(zmq_port) + self._tp_topo.local_rank * KV_RANK_PORT_STRIDE
 
         if self.config.connector_config:
             self.config.connector_config["sender_host"] = sender_host
             self.config.connector_config["sender_zmq_port"] = zmq_port
+            if sender_port_list:
+                self.config.connector_config["sender_zmq_port_list"] = sender_port_list
 
         if self._connector and hasattr(self._connector, "update_sender_info"):
             try:
@@ -737,11 +875,13 @@ class OmniKVTransferManager:
                     self._connector.sender_zmq_port = zmq_port
 
         logger.info(
-            "Sender info updated: host=%s, base_port=%s, adjusted_port=%s (local_rank=%s)",
+            "Sender info updated: host=%s, base_port=%s, adjusted_port=%s "
+            "(local_rank=%s, port_list=%s)",
             sender_host,
             base_zmq_port,
             zmq_port,
             self._tp_topo.local_rank,
+            bool(sender_port_list),
         )
 
     def handle_finished_requests_kv_transfer(
@@ -1055,11 +1195,13 @@ class OmniKVTransferManager:
                     # When from_rank is None (TP<=1), metadata stays None
                     # and the connector falls back to its default sender.
                     rank_metadata: dict[str, Any] | None = None
-                    if from_rank is not None and self._sender_base_host and self._sender_base_zmq_port is not None:
-                        rank_metadata = {
-                            "source_host": self._sender_base_host,
-                            "source_port": self._sender_base_zmq_port + from_rank * KV_RANK_PORT_STRIDE,
-                        }
+                    if from_rank is not None and self._sender_base_host:
+                        source_port = self._sender_port_for_source_rank(from_rank)
+                        if source_port is not None:
+                            rank_metadata = {
+                                "source_host": self._sender_base_host,
+                                "source_port": source_port,
+                            }
 
                     result = self.connector.get(
                         from_stage=from_stage,
