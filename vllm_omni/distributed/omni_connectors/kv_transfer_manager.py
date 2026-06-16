@@ -43,6 +43,30 @@ logger = init_logger(__name__)
 
 LayerKV = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
+
+@dataclass(frozen=True)
+class _ReceiveParallelState:
+    """Receive-side parallel ranks and groups used by KV distribution."""
+
+    cfg_size: int = 1
+    cfg_rank: int = 0
+    cfg_group: Any | None = None
+    sp_size: int = 1
+    sp_rank: int = 0
+    sp_group: Any | None = None
+    ring_size: int = 1
+    ring_rank: int = 0
+    ulysses_size: int = 1
+    ulysses_rank: int = 0
+    pp_size: int = 1
+    pp_rank: int = 0
+    dp_size: int = 1
+    dp_rank: int = 0
+    ep_size: int = 1
+    ep_rank: int = 0
+    ep_group: Any | None = None
+
+
 _SAFE_TORCH_DTYPES = {
     name: dtype
     for name in (
@@ -1270,35 +1294,65 @@ class OmniKVTransferManager:
         except Exception:
             return None
 
+    def _collect_receive_parallel_state(self) -> _ReceiveParallelState:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        from vllm_omni.diffusion.distributed.parallel_state import (
+            get_cfg_group,
+            get_classifier_free_guidance_rank,
+            get_classifier_free_guidance_world_size,
+            get_data_parallel_rank,
+            get_data_parallel_world_size,
+            get_pipeline_parallel_rank,
+            get_pipeline_parallel_world_size,
+            get_ring_parallel_rank,
+            get_ring_parallel_world_size,
+            get_sequence_parallel_rank,
+            get_sequence_parallel_world_size,
+            get_sp_group,
+            get_ulysses_parallel_rank,
+            get_ulysses_parallel_world_size,
+        )
+
+        cfg_size = self._safe_parallel_int(get_classifier_free_guidance_world_size)
+        sp_size = self._safe_parallel_int(get_sequence_parallel_world_size)
+        ep_group = self._safe_parallel_group(get_ep_group)
+        return _ReceiveParallelState(
+            cfg_size=cfg_size,
+            cfg_rank=self._safe_parallel_int(get_classifier_free_guidance_rank, 0),
+            cfg_group=self._safe_parallel_group(get_cfg_group) if cfg_size > 1 else None,
+            sp_size=sp_size,
+            sp_rank=self._safe_parallel_int(get_sequence_parallel_rank, 0),
+            sp_group=self._safe_parallel_group(get_sp_group) if sp_size > 1 else None,
+            ring_size=self._safe_parallel_int(get_ring_parallel_world_size),
+            ring_rank=self._safe_parallel_int(get_ring_parallel_rank, 0),
+            ulysses_size=self._safe_parallel_int(get_ulysses_parallel_world_size),
+            ulysses_rank=self._safe_parallel_int(get_ulysses_parallel_rank, 0),
+            pp_size=self._safe_parallel_int(get_pipeline_parallel_world_size),
+            pp_rank=self._safe_parallel_int(get_pipeline_parallel_rank, 0),
+            dp_size=self._safe_parallel_int(get_data_parallel_world_size),
+            dp_rank=self._safe_parallel_int(get_data_parallel_rank, 0),
+            ep_size=self._group_world_size(ep_group),
+            ep_rank=self._group_rank(ep_group),
+            ep_group=ep_group,
+        )
+
     def _build_receive_parallel_coord(
         self,
         *,
-        cfg_size: int,
-        cfg_rank: int,
-        sp_size: int,
-        sp_rank: int,
-        ring_size: int,
-        ring_rank: int,
-        ulysses_size: int,
-        ulysses_rank: int,
-        pp_size: int,
-        pp_rank: int,
-        dp_size: int,
-        dp_rank: int,
-        ep_size: int,
-        ep_rank: int,
+        state: _ReceiveParallelState,
     ) -> KVParallelRankCoord:
         topo = self._tp_topo
         return KVParallelRankCoord(
             axes=(
                 ParallelAxis("tp", topo.target_tp_size, topo.local_rank, "tensor_shard"),
-                ParallelAxis("pp", pp_size, pp_rank, "tensor_shard"),
-                ParallelAxis("ring", ring_size, ring_rank, "tensor_shard"),
-                ParallelAxis("ulysses", ulysses_size, ulysses_rank, "tensor_shard"),
-                ParallelAxis("cfg", cfg_size, cfg_rank, "branch"),
-                ParallelAxis("sp", sp_size, sp_rank, "container"),
-                ParallelAxis("dp", dp_size, dp_rank, "replica"),
-                ParallelAxis("ep", ep_size, ep_rank, "replica"),
+                ParallelAxis("pp", state.pp_size, state.pp_rank, "tensor_shard"),
+                ParallelAxis("ring", state.ring_size, state.ring_rank, "tensor_shard"),
+                ParallelAxis("ulysses", state.ulysses_size, state.ulysses_rank, "tensor_shard"),
+                ParallelAxis("cfg", state.cfg_size, state.cfg_rank, "branch"),
+                ParallelAxis("sp", state.sp_size, state.sp_rank, "container"),
+                ParallelAxis("dp", state.dp_size, state.dp_rank, "replica"),
+                ParallelAxis("ep", state.ep_size, state.ep_rank, "replica"),
             )
         )
 
@@ -1406,25 +1460,7 @@ class OmniKVTransferManager:
           rank's remote receive through point-to-point local object transfer
         - TP inactive: legacy rank-0 receive then world broadcast
         """
-        from vllm.distributed.parallel_state import get_ep_group
-
-        from vllm_omni.diffusion.distributed.parallel_state import (
-            get_cfg_group,
-            get_classifier_free_guidance_rank,
-            get_classifier_free_guidance_world_size,
-            get_data_parallel_rank,
-            get_data_parallel_world_size,
-            get_pipeline_parallel_rank,
-            get_pipeline_parallel_world_size,
-            get_ring_parallel_rank,
-            get_ring_parallel_world_size,
-            get_sequence_parallel_rank,
-            get_sequence_parallel_world_size,
-            get_sp_group,
-            get_ulysses_parallel_rank,
-            get_ulysses_parallel_world_size,
-            get_world_group,
-        )
+        from vllm_omni.diffusion.distributed.parallel_state import get_world_group
 
         world = get_world_group()
 
@@ -1432,40 +1468,8 @@ class OmniKVTransferManager:
             return self.receive_multi_kv_cache(req, cfg_kv_collect_func, target_device)
 
         topo = self._tp_topo
-        cfg_size = self._safe_parallel_int(get_classifier_free_guidance_world_size)
-        cfg_rank = self._safe_parallel_int(get_classifier_free_guidance_rank, 0)
-        cfg_group = self._safe_parallel_group(get_cfg_group) if cfg_size > 1 else None
-        sp_size = self._safe_parallel_int(get_sequence_parallel_world_size)
-        sp_rank = self._safe_parallel_int(get_sequence_parallel_rank, 0)
-        sp_group = self._safe_parallel_group(get_sp_group) if sp_size > 1 else None
-        ring_size = self._safe_parallel_int(get_ring_parallel_world_size)
-        ring_rank = self._safe_parallel_int(get_ring_parallel_rank, 0)
-        ulysses_size = self._safe_parallel_int(get_ulysses_parallel_world_size)
-        ulysses_rank = self._safe_parallel_int(get_ulysses_parallel_rank, 0)
-        pp_size = self._safe_parallel_int(get_pipeline_parallel_world_size)
-        pp_rank = self._safe_parallel_int(get_pipeline_parallel_rank, 0)
-        dp_size = self._safe_parallel_int(get_data_parallel_world_size)
-        dp_rank = self._safe_parallel_int(get_data_parallel_rank, 0)
-        ep_group = self._safe_parallel_group(get_ep_group)
-        ep_size = self._group_world_size(ep_group)
-        ep_rank = self._group_rank(ep_group)
-
-        coord = self._build_receive_parallel_coord(
-            cfg_size=cfg_size,
-            cfg_rank=cfg_rank,
-            sp_size=sp_size,
-            sp_rank=sp_rank,
-            ring_size=ring_size,
-            ring_rank=ring_rank,
-            ulysses_size=ulysses_size,
-            ulysses_rank=ulysses_rank,
-            pp_size=pp_size,
-            pp_rank=pp_rank,
-            dp_size=dp_size,
-            dp_rank=dp_rank,
-            ep_size=ep_size,
-            ep_rank=ep_rank,
-        )
+        parallel_state = self._collect_receive_parallel_state()
+        coord = self._build_receive_parallel_coord(state=parallel_state)
         plan: KVReceiveDistributionPlan = build_kv_receive_distribution_plan(
             coord=coord,
             world_size=world.world_size,
@@ -1480,17 +1484,17 @@ class OmniKVTransferManager:
                 plan.mode,
                 topo.local_rank,
                 topo.target_tp_size,
-                pp_rank,
-                pp_size,
-                ring_rank,
-                ring_size,
-                ulysses_rank,
-                ulysses_size,
+                parallel_state.pp_rank,
+                parallel_state.pp_size,
+                parallel_state.ring_rank,
+                parallel_state.ring_size,
+                parallel_state.ulysses_rank,
+                parallel_state.ulysses_size,
             )
             if plan.uses_replica_fanout:
                 fanout = self._replica_fanout_peer_ranks(
                     plan=plan,
-                    replica_group=ep_group,
+                    replica_group=parallel_state.ep_group,
                     participates=True,
                 )
                 if fanout is None:
@@ -1501,7 +1505,7 @@ class OmniKVTransferManager:
                     )
                 kv_payload = self._receive_remote_kv_payload_from_replica_fanout(
                     req=req,
-                    replica_group=ep_group,
+                    replica_group=parallel_state.ep_group,
                     fanout=fanout,
                     cfg_kv_collect_func=cfg_kv_collect_func,
                 )
@@ -1519,14 +1523,14 @@ class OmniKVTransferManager:
             if plan.uses_replica_fanout:
                 fanout = self._replica_fanout_peer_ranks(
                     plan=plan,
-                    replica_group=ep_group,
+                    replica_group=parallel_state.ep_group,
                     participates=plan.owner_receives,
                 )
                 if plan.owner_receives and fanout is not None:
                     fanout_attempted = True
                     remote_kv_payload = self._receive_remote_kv_payload_from_replica_fanout(
                         req=req,
-                        replica_group=ep_group,
+                        replica_group=parallel_state.ep_group,
                         fanout=fanout,
                         cfg_kv_collect_func=cfg_kv_collect_func,
                     )
@@ -1544,13 +1548,13 @@ class OmniKVTransferManager:
                     if plan.cfg_active:  # build cfg-local payloads
                         cfg_rank_payloads = self._build_cfg_rank_local_payloads(
                             req,
-                            cfg_size,
+                            parallel_state.cfg_size,
                         )
                         kv_payload = cfg_rank_payloads[0]
                         # send to other cfg
-                        if cfg_group is not None:
-                            for dst_cfg_rank in range(1, cfg_size):
-                                cfg_group.send_object(
+                        if parallel_state.cfg_group is not None:
+                            for dst_cfg_rank in range(1, parallel_state.cfg_size):
+                                parallel_state.cfg_group.send_object(
                                     cfg_rank_payloads[dst_cfg_rank],
                                     dst_cfg_rank,
                                 )
@@ -1558,17 +1562,17 @@ class OmniKVTransferManager:
                         kv_payload = remote_kv_payload
                 else:
                     # Owner receive failed: send None sentinel to CFG followers to avoid deadlock
-                    if plan.cfg_active and cfg_group is not None:
-                        for dst_cfg_rank in range(1, cfg_size):
-                            cfg_group.send_object(
+                    if plan.cfg_active and parallel_state.cfg_group is not None:
+                        for dst_cfg_rank in range(1, parallel_state.cfg_size):
+                            parallel_state.cfg_group.send_object(
                                 None,
                                 dst_cfg_rank,
                             )
-            elif plan.cfg_follower_receives_from_cfg_leader and cfg_group is not None:
-                kv_payload = cfg_group.recv_object(0)
+            elif plan.cfg_follower_receives_from_cfg_leader and parallel_state.cfg_group is not None:
+                kv_payload = parallel_state.cfg_group.recv_object(0)
             # sp broadcast
-            if plan.sp_broadcast_enabled and sp_group is not None:
-                kv_payload = sp_group.broadcast_object(
+            if plan.sp_broadcast_enabled and parallel_state.sp_group is not None:
+                kv_payload = parallel_state.sp_group.broadcast_object(
                     kv_payload,
                     src=0,
                 )
