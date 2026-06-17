@@ -14,12 +14,21 @@ from typing import Literal
 
 KVAxisRole = Literal["tensor_shard", "branch", "replica", "container"]
 KVReplicaFanoutGroup = Literal["ep"]
+# Identity axes used by EP fanout. EP is intentionally omitted because EP ranks
+# are attention-KV replicas; ranks that only differ by EP rank can share one
+# remotely received payload inside the EP group.
 DEFAULT_REPLICA_FANOUT_IDENTITY_AXES = ("tp", "pp", "ring", "ulysses", "cfg")
 
 
 @dataclass(frozen=True)
 class ParallelAxis:
-    """One coordinate in the local parallel mesh."""
+    """One coordinate in the local parallel mesh.
+
+    Example:
+        ParallelAxis("tp", size=2, rank=0, role="tensor_shard") means the
+        current rank is tensor-parallel rank 0 in a TP-2 group. Since TP shards
+        attention KV, this axis participates in KV identity.
+    """
 
     name: str
     size: int = 1
@@ -43,7 +52,13 @@ class ParallelAxis:
 
 @dataclass(frozen=True)
 class KVParallelRankCoord:
-    """Current rank's coordinate in all KV-relevant parallel dimensions."""
+    """Current rank's coordinate in all KV-relevant parallel dimensions.
+
+    Example:
+        A DiT rank with TP2+EP2 may have axes
+        (tp rank 0/2, ep rank 1/2). For KV identity, TP is included because it
+        shards KV, while EP is a replica axis used for local fanout.
+    """
 
     axes: tuple[ParallelAxis, ...]
 

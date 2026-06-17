@@ -1375,7 +1375,18 @@ class OmniKVTransferManager:
         replica_group: Any | None,
         participates: bool,
     ) -> tuple[int, tuple[int, ...]] | None:
-        """Return owner and peer ranks for same-KV replica fanout."""
+        """Return EP-group owner and peers for same-KV replica fanout.
+
+        The returned ranks are rank_in_group values of replica_group, not
+        global ranks and not sender ranks.
+
+        Example:
+            In TP2+EP2, the EP group for tp0 may contain ep ranks 0 and 1.
+            Both ranks have the same KV identity
+            (tp=0/2, pp=0/1, ring=0/1, ulysses=0/1, cfg=0/1), so this returns
+            owner_rank=0 and peer_ranks=(0, 1). The owner receives from the
+            connector once; the peer gets the payload through EP send/recv.
+        """
         if not plan.uses_replica_fanout or replica_group is None:
             return None
         if self._group_world_size(replica_group) <= 1:
@@ -1420,6 +1431,12 @@ class OmniKVTransferManager:
 
         Fanout is only an optimization around the remote connector receive.  It
         does not change the caller's CFG/SP/world distribution semantics.
+
+        Example:
+            If fanout is (owner_rank=0, peer_ranks=(0, 1)) in an EP group,
+            EP rank 0 calls receive_multi_kv_cache() and sends the collected
+            payload to EP rank 1. EP rank 1 only calls recv_object(0) and then
+            applies the received payload locally.
         """
         owner_rank, peer_ranks = fanout
         rank_in_group = self._group_rank(replica_group)
