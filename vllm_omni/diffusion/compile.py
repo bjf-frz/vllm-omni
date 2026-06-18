@@ -8,7 +8,12 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def _matches_repeated_block(name: str, module: nn.Module, repeated_blocks: list[str]) -> bool:
+def _matches_repeated_block(
+    name: str,
+    module: nn.Module,
+    repeated_blocks: list[str],
+    repeated_block_attrs: list[str],
+) -> bool:
     class_name = module.__class__.__name__
     if class_name in repeated_blocks:
         return True
@@ -19,12 +24,7 @@ def _matches_repeated_block(name: str, module: nn.Module, repeated_blocks: list[
             return True
 
     parts = name.split(".")
-    return (
-        "Cosmos3GenDecoderLayer" in repeated_blocks
-        and len(parts) >= 2
-        and parts[-2] == "gen_layers"
-        and parts[-1].isdigit()
-    )
+    return len(parts) >= 2 and parts[-2] in repeated_block_attrs and parts[-1].isdigit()
 
 
 def regionally_compile(model: nn.Module, *compile_args: Any, **compile_kwargs: Any) -> nn.Module:
@@ -46,11 +46,13 @@ def regionally_compile(model: nn.Module, *compile_args: Any, **compile_kwargs: A
         logger.warning("Regional compilation skipped because the model does not define `_repeated_blocks`.")
         return model
 
+    repeated_block_attrs = getattr(model, "_layerwise_offload_blocks_attrs", [])
+
     # Check if we have modules with the specified class names
     has_compiled_region = False
     compiled_region_count = 0
     for name, submod in model.named_modules():
-        if _matches_repeated_block(name, submod, repeated_blocks):
+        if _matches_repeated_block(name, submod, repeated_blocks, repeated_block_attrs):
             # Compile this submodule
             submod.compile(*compile_args, **compile_kwargs)
             has_compiled_region = True
