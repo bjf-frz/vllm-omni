@@ -144,6 +144,7 @@ from vllm_omni.entrypoints.openai.video_api_utils import decode_audio_url, decod
 from vllm_omni.entrypoints.openpi.serving import ServingRealtimeRobotOpenPI
 from vllm_omni.errors import OmniClientError
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
+from vllm_omni.utils.forced_aligner import build_forced_aligner_config
 from vllm_omni.utils.tracking_parser import TrackingArgumentParser, TrackingNamespace
 
 logger = init_logger(__name__)
@@ -1058,7 +1059,11 @@ async def omni_init_app_state(
     )
 
     state.openai_serving_speech = OmniOpenAIServingSpeech(
-        engine_client, state.openai_serving_models, request_logger=request_logger, model_name=model_name
+        engine_client,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        model_name=model_name,
+        forced_aligner_config=build_forced_aligner_config(args),
     )
 
     # Warm up speech pipeline (CUDA Graph capture, torch.compile) so the first
@@ -1195,7 +1200,7 @@ _remove_route_from_router(router, "/v1/audio/speech", {"POST"})
     "/v1/audio/speech",
     dependencies=[Depends(validate_json_request)],
     responses={
-        HTTPStatus.OK.value: {"content": {"audio/*": {}}},
+        HTTPStatus.OK.value: {"content": {"audio/*": {}, "text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
