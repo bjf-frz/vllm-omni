@@ -1753,29 +1753,7 @@ class Cosmos3OmniDiffusersPipeline(
 
     # -- I2V latent preparation ---------------------------------------------
 
-    def _encode_conditioning_video(
-        self,
-        image_tensor: torch.Tensor,
-        num_frames: int,
-        height: int,
-        width: int,
-    ) -> torch.Tensor:
-        """VAE-encode a conditioning image as a full-length video.
-
-        The WAN VAE has temporal compression (factor 4), so encoding a single
-        frame produces degenerate temporal features.  We fill the entire
-        pixel-space video with the conditioning image (repeating it across all
-        frames) so the temporal encoder sees plausible content everywhere.
-        The caller keeps only the conditioned latent frame(s) and replaces
-        the rest with noise.
-        """
-        # image_tensor: [1, 3, H, W] -> [1, 3, num_frames, H, W]
-        video = image_tensor.unsqueeze(2).expand(-1, -1, num_frames, -1, -1).contiguous()
-        video = video.to(device=self.device, dtype=self.vae.dtype)
-
-        latent = self.vae.encode(video).latent_dist.mode()
-
-        # Normalize (inverse of _decode_latents denormalization)
+    def _normalize_vae_latent(self, latent: torch.Tensor) -> torch.Tensor:
         if hasattr(self.vae.config, "latents_mean") and hasattr(self.vae.config, "latents_std"):
             latents_mean = (
                 torch.tensor(self.vae.config.latents_mean).view(1, -1, 1, 1, 1).to(latent.device, latent.dtype)
@@ -1786,7 +1764,19 @@ class Cosmos3OmniDiffusersPipeline(
             scaling_factor = getattr(self.vae.config, "scaling_factor", 1.0)
             latent = latent * scaling_factor
 
-        return latent.to(self.dtype)
+        return latent
+
+    def _encode_conditioning_image_latent(self, image_tensor: torch.Tensor) -> torch.Tensor:
+        """VAE-encode the first I2V conditioning frame.
+
+        I2V only consumes the first conditioning latent frame.  Encoding the
+        input image as a one-frame video keeps that latent while avoiding VAE
+        work for repeated frames that are later replaced by noise.
+        """
+        video = image_tensor.unsqueeze(2).to(device=self.device, dtype=self.vae.dtype)
+        latent = self.vae.encode(video).latent_dist.mode()
+        latent = self._normalize_vae_latent(latent)
+        return latent[:, :, 0:1, :, :].to(self.dtype)
 
     def _latent_hw_from_image_size(self, image_size: Any | None) -> tuple[int, int] | None:
         if image_size is None:
@@ -1821,16 +1811,7 @@ class Cosmos3OmniDiffusersPipeline(
         video = video_tensor.to(device=self.device, dtype=self.vae.dtype)
         latent = self.vae.encode(video).latent_dist.mode()
 
-        if hasattr(self.vae.config, "latents_mean") and hasattr(self.vae.config, "latents_std"):
-            latents_mean = (
-                torch.tensor(self.vae.config.latents_mean).view(1, -1, 1, 1, 1).to(latent.device, latent.dtype)
-            )
-            latents_std = torch.tensor(self.vae.config.latents_std).view(1, -1, 1, 1, 1).to(latent.device, latent.dtype)
-            latent = (latent - latents_mean) / latents_std
-        else:
-            scaling_factor = getattr(self.vae.config, "scaling_factor", 1.0)
-            latent = latent * scaling_factor
-
+        latent = self._normalize_vae_latent(latent)
         latent = self._crop_latent_to_image_size(latent, image_size)
         return latent.to(self.dtype)
 
@@ -1861,13 +1842,12 @@ class Cosmos3OmniDiffusersPipeline(
             dtype=self.dtype,
         )
 
-        cond_latent = self._encode_conditioning_video(image_tensor, num_frames, height, width)
-        image_latent = cond_latent[:, :, 0:1, :, :]
+        image_latent = self._encode_conditioning_image_latent(image_tensor)
+        latents = noise
+        latents[:, :, 0:1, :, :] = image_latent
 
-        condition_mask = torch.zeros(1, 1, T_lat, 1, 1, device=self.device, dtype=self.dtype)
-        condition_mask[:, :, 0, :, :] = 1.0
-        latents = condition_mask * cond_latent + (1.0 - condition_mask) * noise
-        velocity_mask = 1.0 - condition_mask
+        velocity_mask = torch.ones(1, 1, T_lat, 1, 1, device=self.device, dtype=self.dtype)
+        velocity_mask[:, :, 0, :, :] = 0.0
         return latents, velocity_mask, image_latent
 
     def _prepare_latents_v2v(
