@@ -89,13 +89,8 @@ class DiffusionModelRunner(OmniConnectorModelRunnerMixin):
         if model is None:
             return
 
-        use_hsdp = getattr(getattr(self.od_config, "parallel_config", None), "use_hsdp", False)
-        compile_kwargs = {"dynamic": True}
-        if use_hsdp:
-            compile_kwargs["compile_forward"] = True
-
         try:
-            setattr(self.pipeline, attr_name, regionally_compile(model, **compile_kwargs))
+            setattr(self.pipeline, attr_name, regionally_compile(model, dynamic=True))
             logger.info("Model runner: %s compiled with torch.compile.", attr_name)
         except Exception as e:
             logger.warning(

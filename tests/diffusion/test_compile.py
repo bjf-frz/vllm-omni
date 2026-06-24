@@ -31,16 +31,7 @@ class _ModelWithWrappedRepeatedBlocks(nn.Module):
         self.other_blocks = nn.ModuleList([_WrappedBlock()])
 
 
-def test_regionally_compile_matches_wrapped_blocks_by_declared_container_attr():
-    model = _ModelWithWrappedRepeatedBlocks()
-
-    regionally_compile(model)
-
-    assert all(block.compile_called for block in model.transformer_blocks)
-    assert not model.other_blocks[0].compile_called
-
-
-def test_regionally_compile_can_compile_forward_instead_of_module_call(monkeypatch):
+def test_regionally_compile_matches_wrapped_blocks_by_declared_container_attr(monkeypatch):
     model = _ModelWithWrappedRepeatedBlocks()
     compile_calls = []
 
@@ -54,7 +45,7 @@ def test_regionally_compile_can_compile_forward_instead_of_module_call(monkeypat
 
     monkeypatch.setattr(compile_module.torch, "compile", _compile)
 
-    regionally_compile(model, compile_forward=True, dynamic=True)
+    regionally_compile(model, dynamic=True)
 
     assert len(compile_calls) == 2
     assert all(not block.compile_called for block in model.transformer_blocks)

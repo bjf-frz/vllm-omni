@@ -75,8 +75,9 @@ def _make_compile_runner(*, use_hsdp: bool):
 
 @pytest.mark.core_model
 @pytest.mark.cpu
-def test_compile_transformer_compiles_forward_under_hsdp(monkeypatch):
-    runner = _make_compile_runner(use_hsdp=True)
+@pytest.mark.parametrize("use_hsdp", [False, True])
+def test_compile_transformer_regionally_compiles_blocks(monkeypatch, use_hsdp):
+    runner = _make_compile_runner(use_hsdp=use_hsdp)
     compile_calls = []
 
     def _regionally_compile(model, *args, **kwargs):
@@ -91,29 +92,9 @@ def test_compile_transformer_compiles_forward_under_hsdp(monkeypatch):
         (
             runner.pipeline.transformer,
             (),
-            {
-                "dynamic": True,
-                "compile_forward": True,
-            },
+            {"dynamic": True},
         )
     ]
-
-
-@pytest.mark.core_model
-@pytest.mark.cpu
-def test_compile_transformer_keeps_non_hsdp_default_backend(monkeypatch):
-    runner = _make_compile_runner(use_hsdp=False)
-    compile_calls = []
-
-    def _regionally_compile(model, *args, **kwargs):
-        compile_calls.append((model, args, kwargs))
-        return model
-
-    monkeypatch.setattr(model_runner_module, "regionally_compile", _regionally_compile)
-
-    DiffusionModelRunner._compile_transformer(runner, "transformer")
-
-    assert compile_calls == [(runner.pipeline.transformer, (), {"dynamic": True})]
 
 
 @pytest.mark.core_model

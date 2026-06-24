@@ -31,7 +31,6 @@ def _matches_repeated_block(
 def regionally_compile(
     model: nn.Module,
     *compile_args: Any,
-    compile_forward: bool = False,
     **compile_kwargs: Any,
 ) -> nn.Module:
     """
@@ -40,9 +39,6 @@ def regionally_compile(
     Args:
         model: The PyTorch model instance to compile
         *compile_args: Positional arguments forwarded to torch.compile
-        compile_forward: Compile each repeated block's forward method instead
-            of its module call path. This keeps wrapper hooks such as HSDP/FSDP2
-            outside the compiled graph.
         **compile_kwargs: Keyword arguments forwarded to torch.compile
 
     Returns:
@@ -62,11 +58,9 @@ def regionally_compile(
     compiled_region_count = 0
     for name, submod in model.named_modules():
         if _matches_repeated_block(name, submod, repeated_blocks, repeated_block_attrs):
-            # Compile this submodule
-            if compile_forward:
-                submod.forward = torch.compile(submod.forward, *compile_args, **compile_kwargs)
-            else:
-                submod.compile(*compile_args, **compile_kwargs)
+            # Compile the block compute while keeping nn.Module.__call__ hooks
+            # outside the compiled graph.
+            submod.forward = torch.compile(submod.forward, *compile_args, **compile_kwargs)
             has_compiled_region = True
             compiled_region_count += 1
 
