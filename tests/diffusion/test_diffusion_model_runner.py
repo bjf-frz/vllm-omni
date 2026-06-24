@@ -66,6 +66,56 @@ def _make_runner(cache_backend, cache_backend_name: str, enable_cache_dit_summar
     return runner
 
 
+def _make_compile_runner(*, use_hsdp: bool):
+    runner = object.__new__(DiffusionModelRunner)
+    runner.pipeline = SimpleNamespace(transformer=SimpleNamespace())
+    runner.od_config = SimpleNamespace(parallel_config=SimpleNamespace(use_hsdp=use_hsdp))
+    return runner
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
+def test_compile_transformer_compiles_forward_under_hsdp(monkeypatch):
+    runner = _make_compile_runner(use_hsdp=True)
+    compile_calls = []
+
+    def _regionally_compile(model, *args, **kwargs):
+        compile_calls.append((model, args, kwargs))
+        return model
+
+    monkeypatch.setattr(model_runner_module, "regionally_compile", _regionally_compile)
+
+    DiffusionModelRunner._compile_transformer(runner, "transformer")
+
+    assert compile_calls == [
+        (
+            runner.pipeline.transformer,
+            (),
+            {
+                "dynamic": True,
+                "compile_forward": True,
+            },
+        )
+    ]
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
+def test_compile_transformer_keeps_non_hsdp_default_backend(monkeypatch):
+    runner = _make_compile_runner(use_hsdp=False)
+    compile_calls = []
+
+    def _regionally_compile(model, *args, **kwargs):
+        compile_calls.append((model, args, kwargs))
+        return model
+
+    monkeypatch.setattr(model_runner_module, "regionally_compile", _regionally_compile)
+
+    DiffusionModelRunner._compile_transformer(runner, "transformer")
+
+    assert compile_calls == [(runner.pipeline.transformer, (), {"dynamic": True})]
+
+
 @pytest.mark.core_model
 @hardware_test(res={"cuda": "L4"}, num_cards=1)
 def test_execute_model_skips_cache_summary_without_active_cache_backend(monkeypatch):

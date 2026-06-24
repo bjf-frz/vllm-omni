@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import torch
 import torch.nn as nn
 from vllm.logger import init_logger
 
@@ -27,13 +28,21 @@ def _matches_repeated_block(
     return len(parts) >= 2 and parts[-2] in repeated_block_attrs and parts[-1].isdigit()
 
 
-def regionally_compile(model: nn.Module, *compile_args: Any, **compile_kwargs: Any) -> nn.Module:
+def regionally_compile(
+    model: nn.Module,
+    *compile_args: Any,
+    compile_forward: bool = False,
+    **compile_kwargs: Any,
+) -> nn.Module:
     """
     Apply regional compilation to a PyTorch model.
 
     Args:
         model: The PyTorch model instance to compile
         *compile_args: Positional arguments forwarded to torch.compile
+        compile_forward: Compile each repeated block's forward method instead
+            of its module call path. This keeps wrapper hooks such as HSDP/FSDP2
+            outside the compiled graph.
         **compile_kwargs: Keyword arguments forwarded to torch.compile
 
     Returns:
@@ -54,7 +63,10 @@ def regionally_compile(model: nn.Module, *compile_args: Any, **compile_kwargs: A
     for name, submod in model.named_modules():
         if _matches_repeated_block(name, submod, repeated_blocks, repeated_block_attrs):
             # Compile this submodule
-            submod.compile(*compile_args, **compile_kwargs)
+            if compile_forward:
+                submod.forward = torch.compile(submod.forward, *compile_args, **compile_kwargs)
+            else:
+                submod.compile(*compile_args, **compile_kwargs)
             has_compiled_region = True
             compiled_region_count += 1
 
