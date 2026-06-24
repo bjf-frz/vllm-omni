@@ -232,7 +232,8 @@ class Attention(nn.Module):
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         if torch.compiler.is_compiling() and is_forward_context_available():
-            parallel_config = get_forward_context().omni_diffusion_config.parallel_config
+            od_config = get_forward_context().omni_diffusion_config
+            parallel_config = getattr(od_config, "parallel_config", None)
             if getattr(parallel_config, "use_hsdp", False):
                 # Keep HSDP/FSDP2 parameter all-gather outside Inductor's
                 # attention graph; otherwise scheduler dependency analysis can
