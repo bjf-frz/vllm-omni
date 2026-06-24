@@ -3,10 +3,13 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.forward_context import set_forward_context
+
+pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, pytest.mark.cpu]
 
 
 def test_attention_uses_compile_boundary_for_hsdp(monkeypatch):

@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch.nn as nn
 
 import vllm_omni.diffusion.compile as compile_module
 from vllm_omni.diffusion.compile import regionally_compile
+
+pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, pytest.mark.cpu]
 
 
 class _WrappedBlock(nn.Module):
@@ -39,7 +42,7 @@ def test_regionally_compile_matches_wrapped_blocks_by_declared_container_attr(mo
         compile_calls.append((fn, args, kwargs))
 
         def _compiled(*fn_args, **fn_kwargs):
-            return fn(*fn_args, **fn_kwargs)
+            return f"compiled:{fn(*fn_args, **fn_kwargs)}"
 
         return _compiled
 
@@ -50,4 +53,4 @@ def test_regionally_compile_matches_wrapped_blocks_by_declared_container_attr(mo
     assert len(compile_calls) == 2
     assert all(not block.compile_called for block in model.transformer_blocks)
     assert not model.other_blocks[0].compile_called
-    assert model.transformer_blocks[0].forward("ok") == "ok"
+    assert model.transformer_blocks[0].forward("ok") == "compiled:ok"
