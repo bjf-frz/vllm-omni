@@ -4,9 +4,12 @@
 
 import pytest
 
+from vllm_omni.config.omni_config import OmniStageDiffusionParallelConfig
 from vllm_omni.distributed.omni_connectors.utils.parallel_plan import (
     KVParallelRankCoord,
+    KVReceiveRankInfo,
     ParallelAxis,
+    build_kv_parallel_rank_coord,
     build_kv_receive_distribution_plan,
 )
 
@@ -27,6 +30,8 @@ def _coord(
     pp_rank: int = 0,
     tp_size: int = 1,
     tp_rank: int = 0,
+    dp_size: int = 1,
+    dp_rank: int = 0,
     ep_size: int = 1,
     ep_rank: int = 0,
 ) -> KVParallelRankCoord:
@@ -38,7 +43,7 @@ def _coord(
             ParallelAxis("ulysses", ulysses_size, ulysses_rank, "tensor_shard"),
             ParallelAxis("cfg", cfg_size, cfg_rank, "branch"),
             ParallelAxis("sp", sp_size, sp_rank, "container"),
-            ParallelAxis("dp", 1, 0, "replica"),
+            ParallelAxis("dp", dp_size, dp_rank, "replica"),
             ParallelAxis("ep", ep_size, ep_rank, "replica"),
         )
     )
@@ -108,24 +113,24 @@ def test_ep_replica_axis_does_not_change_world_broadcast_mode():
     assert not plan.coord.axis("ep").shards_kv
 
 
-def test_ep_enables_fanout_without_changing_independent_remote_mode():
+def test_current_moe_ep_group_does_not_fanout_independent_remote_mode():
     plan = _plan(_coord(ep_size=2, ep_rank=1), source_tp=2, target_tp=2)
 
     assert plan.mode == "independent_remote"
-    assert plan.uses_replica_fanout
-    assert plan.replica_fanout_group == "ep"
+    assert not plan.uses_replica_fanout
+    assert plan.replica_fanout_group is None
     assert ("ep", 1, 2) not in plan.replica_fanout_identity
 
 
-def test_ep_enables_fanout_without_changing_cfg_local_distribution_mode():
+def test_current_moe_ep_group_does_not_fanout_cfg_local_distribution_mode():
     plan = _plan(_coord(cfg_size=2, cfg_rank=0, ep_size=2))
 
     assert plan.mode == "cfg_sp_local_distribution"
-    assert plan.uses_replica_fanout
+    assert not plan.uses_replica_fanout
     assert plan.owner_receives
 
 
-def test_replica_fanout_identity_tracks_kv_sharding_axes():
+def test_replica_fanout_identity_tracks_kv_sharding_axes_for_future_ep_axis():
     base = _plan(_coord(tp_size=2, tp_rank=0, cfg_size=2, cfg_rank=0, ep_size=2))
     different_ep = _plan(_coord(tp_size=2, tp_rank=0, cfg_size=2, cfg_rank=0, ep_size=2, ep_rank=1))
     different_tp = _plan(_coord(tp_size=2, tp_rank=1, cfg_size=2, cfg_rank=0, ep_size=2))
@@ -134,3 +139,39 @@ def test_replica_fanout_identity_tracks_kv_sharding_axes():
     assert base.replica_fanout_identity == different_ep.replica_fanout_identity
     assert base.replica_fanout_identity != different_tp.replica_fanout_identity
     assert base.replica_fanout_identity != different_cfg.replica_fanout_identity
+
+
+def test_coord_builder_accepts_vllm_omni_parallel_config_shape():
+    parallel_config = OmniStageDiffusionParallelConfig(
+        pipeline_parallel_size=2,
+        ring_degree=2,
+        ulysses_degree=2,
+        cfg_parallel_size=2,
+        data_parallel_size=2,
+    )
+
+    coord = build_kv_parallel_rank_coord(
+        parallel_config=parallel_config,
+        ranks=KVReceiveRankInfo(
+            tp_rank=1,
+            pp_rank=1,
+            ring_rank=1,
+            ulysses_rank=0,
+            cfg_rank=1,
+            sp_rank=3,
+            dp_rank=1,
+            dp_size=2,
+            ep_rank=1,
+            ep_size=2,
+        ),
+        target_tp_size=4,
+    )
+
+    assert (coord.size("tp"), coord.rank("tp")) == (4, 1)
+    assert (coord.size("pp"), coord.rank("pp")) == (2, 1)
+    assert (coord.size("ring"), coord.rank("ring")) == (2, 1)
+    assert (coord.size("ulysses"), coord.rank("ulysses")) == (2, 0)
+    assert (coord.size("cfg"), coord.rank("cfg")) == (2, 1)
+    assert (coord.size("sp"), coord.rank("sp")) == (4, 3)
+    assert (coord.size("dp"), coord.rank("dp")) == (2, 1)
+    assert (coord.size("ep"), coord.rank("ep")) == (2, 1)

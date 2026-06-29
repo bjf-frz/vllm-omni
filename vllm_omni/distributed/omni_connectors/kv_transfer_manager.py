@@ -8,12 +8,16 @@ import struct
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import torch
 from vllm.logger import init_logger
 
+from vllm_omni.config.omni_config import (
+    OmniStageDiffusionParallelConfig,
+    OmniStageParallelConfig,
+)
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.platforms import current_omni_platform
 
@@ -98,10 +102,9 @@ class _TransferTopoConfig:
 
 @dataclass(frozen=True)
 class _ReceiveParallelState:
-    """Receive-side runtime ranks/groups plus existing parallel configs."""
+    """Receive-side runtime ranks/groups plus the unified parallel config."""
 
-    parallel_config: Any | None = None
-    runtime_parallel_sizes: dict[str, int] = field(default_factory=dict)
+    parallel_config: OmniStageParallelConfig
     cfg_rank: int = 0
     cfg_group: Any | None = None
     sp_rank: int = 0
@@ -156,8 +159,7 @@ class OmniKVCacheConfig:
     recv_timeout: float = 30.0
     from_tp: int = 1
     to_tp: int = 1
-    vllm_config: Any | None = None
-    diffusion_parallel_config: Any | None = None
+    parallel_config: OmniStageParallelConfig | None = None
     enable_kv_async_prefetch: bool = False
     kv_prefetch_min_free_mem_ratio: float = 0.0
 
@@ -458,15 +460,13 @@ class OmniKVTransferManager:
         cfg: dict | None,
         *,
         async_prefetch: bool = False,
-        vllm_config: Any | None = None,
-        diffusion_parallel_config: Any | None = None,
+        parallel_config: OmniStageParallelConfig | None = None,
     ) -> "OmniKVTransferManager":
         """Create manager from raw config dict."""
         if not cfg or not isinstance(cfg, dict):
             return cls(
                 OmniKVCacheConfig(
-                    vllm_config=vllm_config,
-                    diffusion_parallel_config=diffusion_parallel_config,
+                    parallel_config=parallel_config,
                 ),
                 async_prefetch=async_prefetch,
             )
@@ -487,8 +487,7 @@ class OmniKVTransferManager:
                 recv_timeout=cfg.get("recv_timeout", 30.0),
                 from_tp=int(rank_mapping.get("from_tp", 1)),
                 to_tp=int(rank_mapping.get("to_tp", 1)),
-                vllm_config=vllm_config,
-                diffusion_parallel_config=diffusion_parallel_config,
+                parallel_config=parallel_config,
                 enable_kv_async_prefetch=async_prefetch,
                 kv_prefetch_min_free_mem_ratio=cfg.get("kv_prefetch_min_free_mem_ratio", 0.0),
             ),
@@ -521,8 +520,7 @@ class OmniKVTransferManager:
         return cls._create(
             omni_kv,
             async_prefetch=async_prefetch,
-            vllm_config=vllm_config,
-            diffusion_parallel_config=getattr(config, "parallel_config", None),
+            parallel_config=getattr(config, "parallel_config", None) or getattr(vllm_config, "parallel_config", None),
         )
 
     from_model_config = from_od_config
@@ -536,8 +534,11 @@ class OmniKVTransferManager:
 
         connector_cfg = cls._connector_cfg_from_kv_transfer(getattr(vllm_config, "kv_transfer_config", None))
         if connector_cfg is not None:
-            return cls._create({"connector_config": connector_cfg}, vllm_config=vllm_config)
-        return cls(OmniKVCacheConfig(vllm_config=vllm_config))
+            return cls._create(
+                {"connector_config": connector_cfg},
+                parallel_config=getattr(vllm_config, "parallel_config", None),
+            )
+        return cls(OmniKVCacheConfig(parallel_config=getattr(vllm_config, "parallel_config", None)))
 
     @staticmethod
     def _connector_cfg_from_kv_transfer(kv_cfg: Any) -> dict | None:
@@ -1664,43 +1665,22 @@ class OmniKVTransferManager:
         except Exception:
             return None
 
-    @staticmethod
-    def _get_parallel_config_attr(config: Any, name: str) -> Any | None:
-        if config is None:
-            return None
-        if isinstance(config, dict):
-            return config.get(name)
-        return getattr(config, name, None)
-
-    @classmethod
-    def _parallel_size_from_configs(
-        cls,
-        *,
-        diffusion_parallel_config: Any | None,
-        vllm_parallel_config: Any | None,
-        runtime_parallel_sizes: dict[str, int] | None,
-        name: str,
-        default: int = 1,
-    ) -> int:
-        for config in (diffusion_parallel_config, vllm_parallel_config):
-            value = cls._get_parallel_config_attr(config, name)
-            if value is None:
-                continue
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                logger.warning("Ignoring invalid parallel config value %s=%r", name, value)
-        if runtime_parallel_sizes is not None and name in runtime_parallel_sizes:
-            return int(runtime_parallel_sizes[name])
-        return default
-
     def _receive_parallel_size(self, state: _ReceiveParallelState, name: str, default: int = 1) -> int:
-        return self._parallel_size_from_configs(
-            diffusion_parallel_config=state.parallel_config,
-            vllm_parallel_config=None,
-            runtime_parallel_sizes=state.runtime_parallel_sizes,
-            name=name,
-            default=default,
+        return int(getattr(state.parallel_config, name, default))
+
+    def _configured_parallel_int(self, name: str, default: int = 1) -> int:
+        """Read a parallel size from the unified config when available."""
+        parallel_config = self.config.parallel_config
+        return int(getattr(parallel_config, name, default)) if parallel_config is not None else default
+
+    def _runtime_parallel_config(self, runtime_parallel_sizes: dict[str, int]) -> OmniStageDiffusionParallelConfig:
+        return OmniStageDiffusionParallelConfig(
+            pipeline_parallel_size=runtime_parallel_sizes["pipeline_parallel_size"],
+            data_parallel_size=runtime_parallel_sizes["data_parallel_size"],
+            tensor_parallel_size=self._tp_topo.target_tp_size,
+            ulysses_degree=runtime_parallel_sizes["ulysses_degree"],
+            ring_degree=runtime_parallel_sizes["ring_degree"],
+            cfg_parallel_size=runtime_parallel_sizes["cfg_parallel_size"],
         )
 
     def _collect_receive_parallel_state(self) -> _ReceiveParallelState:
@@ -1724,11 +1704,6 @@ class OmniKVTransferManager:
             get_world_group,
         )
 
-        parallel_config = self.config.diffusion_parallel_config or getattr(
-            self.config.vllm_config,
-            "parallel_config",
-            None,
-        )
         runtime_parallel_sizes = {
             "cfg_parallel_size": self._safe_parallel_int(get_classifier_free_guidance_world_size),
             "sequence_parallel_size": self._safe_parallel_int(get_sequence_parallel_world_size),
@@ -1737,22 +1712,12 @@ class OmniKVTransferManager:
             "pipeline_parallel_size": self._safe_parallel_int(get_pipeline_parallel_world_size),
             "data_parallel_size": self._safe_parallel_int(get_data_parallel_world_size),
         }
-        cfg_size = self._parallel_size_from_configs(
-            diffusion_parallel_config=parallel_config,
-            vllm_parallel_config=None,
-            runtime_parallel_sizes=runtime_parallel_sizes,
-            name="cfg_parallel_size",
-        )
-        sp_size = self._parallel_size_from_configs(
-            diffusion_parallel_config=parallel_config,
-            vllm_parallel_config=None,
-            runtime_parallel_sizes=runtime_parallel_sizes,
-            name="sequence_parallel_size",
-        )
+        parallel_config = self.config.parallel_config or self._runtime_parallel_config(runtime_parallel_sizes)
+        cfg_size = int(getattr(parallel_config, "cfg_parallel_size", 1))
+        sp_size = int(getattr(parallel_config, "sequence_parallel_size", 1))
         ep_group = self._safe_parallel_group(get_ep_group)
         return _ReceiveParallelState(
             parallel_config=parallel_config,
-            runtime_parallel_sizes=runtime_parallel_sizes,
             cfg_rank=self._safe_parallel_int(get_classifier_free_guidance_rank, 0),
             cfg_group=self._safe_parallel_group(get_cfg_group) if cfg_size > 1 else None,
             sp_rank=self._safe_parallel_int(get_sequence_parallel_rank, 0),
@@ -1771,9 +1736,8 @@ class OmniKVTransferManager:
     ) -> tuple[KVReceiveDistributionPlan, _ReceiveParallelState]:
         state = self._collect_receive_parallel_state()
         topo = self._tp_topo
-        parallel_config = state.parallel_config or state.runtime_parallel_sizes
         coord = build_kv_parallel_rank_coord(
-            parallel_config=parallel_config,
+            parallel_config=state.parallel_config,
             ranks=KVReceiveRankInfo(
                 tp_rank=topo.local_rank,
                 pp_rank=state.pp_rank,
@@ -1782,6 +1746,7 @@ class OmniKVTransferManager:
                 cfg_rank=state.cfg_rank,
                 sp_rank=state.sp_rank,
                 dp_rank=state.dp_rank,
+                dp_size=int(getattr(state.parallel_config, "data_parallel_size", 1)),
                 ep_rank=state.ep_rank,
                 ep_size=self._group_world_size(state.ep_group),
             ),

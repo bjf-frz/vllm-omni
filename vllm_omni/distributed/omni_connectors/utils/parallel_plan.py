@@ -10,7 +10,10 @@ which ranks should receive remotely and which local collectives are safe.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from vllm_omni.config.omni_config import OmniStageParallelConfig
 
 KVAxisRole = Literal["tensor_shard", "branch", "replica", "container"]
 KVReplicaFanoutGroup = Literal["ep"]
@@ -18,6 +21,27 @@ KVReplicaFanoutGroup = Literal["ep"]
 # are attention-KV replicas; ranks that only differ by EP rank can share one
 # remotely received payload inside the EP group.
 DEFAULT_REPLICA_FANOUT_IDENTITY_AXES = ("tp", "pp", "ring", "ulysses", "cfg")
+
+
+@dataclass(frozen=True)
+class KVReceiveRankInfo:
+    """Runtime rank coordinates needed to project a ParallelConfig into KV semantics.
+
+    Size fields come from the unified ``OmniStageParallelConfig`` hierarchy.
+    This object carries only runtime ranks and the EP group size, because EP
+    size is supplied by vLLM's live expert-parallel group.
+    """
+
+    tp_rank: int = 0
+    pp_rank: int = 0
+    ring_rank: int = 0
+    ulysses_rank: int = 0
+    cfg_rank: int = 0
+    sp_rank: int = 0
+    dp_rank: int = 0
+    dp_size: int = 1
+    ep_rank: int = 0
+    ep_size: int = 1
 
 
 @dataclass(frozen=True)
@@ -86,6 +110,57 @@ class KVParallelRankCoord:
     @property
     def pp_sharded(self) -> bool:
         return self.size("pp") > 1
+
+
+def build_kv_parallel_rank_coord(
+    *,
+    parallel_config: OmniStageParallelConfig,
+    ranks: KVReceiveRankInfo,
+    target_tp_size: int,
+) -> KVParallelRankCoord:
+    """Build a KV rank coordinate from the unified per-stage parallel config."""
+    return KVParallelRankCoord(
+        axes=(
+            ParallelAxis("tp", target_tp_size, ranks.tp_rank, "tensor_shard"),
+            ParallelAxis(
+                "pp",
+                int(parallel_config.pipeline_parallel_size),
+                ranks.pp_rank,
+                "tensor_shard",
+            ),
+            ParallelAxis(
+                "ring",
+                int(getattr(parallel_config, "ring_degree", 1)),
+                ranks.ring_rank,
+                "tensor_shard",
+            ),
+            ParallelAxis(
+                "ulysses",
+                int(getattr(parallel_config, "ulysses_degree", 1)),
+                ranks.ulysses_rank,
+                "tensor_shard",
+            ),
+            ParallelAxis(
+                "cfg",
+                int(getattr(parallel_config, "cfg_parallel_size", 1)),
+                ranks.cfg_rank,
+                "branch",
+            ),
+            ParallelAxis(
+                "sp",
+                int(getattr(parallel_config, "sequence_parallel_size", 1)),
+                ranks.sp_rank,
+                "container",
+            ),
+            ParallelAxis(
+                "dp",
+                int(getattr(parallel_config, "data_parallel_size", ranks.dp_size)),
+                ranks.dp_rank,
+                "replica",
+            ),
+            ParallelAxis("ep", ranks.ep_size, ranks.ep_rank, "replica"),
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -189,7 +264,6 @@ def build_kv_receive_distribution_plan(
     sp_broadcast_enabled = sp_active
     pp_sharded = coord.pp_sharded
     local_distribution = cfg_active or sp_broadcast_enabled
-    ep_active = coord.size("ep") > 1
 
     def build_plan(
         *,
@@ -201,10 +275,12 @@ def build_kv_receive_distribution_plan(
         ],
         owner_receives: bool,
     ) -> KVReceiveDistributionPlan:
-        replica_fanout_enabled = ep_active and mode in (
-            "independent_remote",
-            "cfg_sp_local_distribution",
-        )
+        # Current vLLM-Omni EP is not an independent parallel axis in the
+        # unified config. ``get_ep_group()`` is derived from the existing
+        # TP/SP/CFG/DP mesh for MoE expert dispatch, so ranks in that group are
+        # not guaranteed to be KV-equivalent replicas. Keep KV replica fanout
+        # disabled until an explicit ep_size axis exists.
+        replica_fanout_enabled = False
         return KVReceiveDistributionPlan(
             coord=coord,
             world_size=world_size,
