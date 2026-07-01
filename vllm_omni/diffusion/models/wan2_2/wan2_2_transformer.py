@@ -709,6 +709,7 @@ class WanTransformerBlock(nn.Module):
         temb: torch.Tensor,
         rotary_emb: tuple[torch.Tensor, torch.Tensor],
         hidden_states_mask: torch.Tensor | None = None,
+        vsa_dit_seq_shape: tuple[int, int, int] | None = None,
     ) -> torch.Tensor:
         if temb.ndim == 4:
             # temb: batch_size, seq_len, 6, inner_dim (wan2.2 ti2v)
@@ -729,7 +730,10 @@ class WanTransformerBlock(nn.Module):
 
         # 1. Self-attention
         norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa).type_as(hidden_states)
-        self_attn_metadata = AttentionMetadata(attn_mask=hidden_states_mask)
+        self_attn_extra = {}
+        if vsa_dit_seq_shape is not None:
+            self_attn_extra["vsa_dit_seq_shape"] = vsa_dit_seq_shape
+        self_attn_metadata = AttentionMetadata(attn_mask=hidden_states_mask, extra=self_attn_extra)
         attn_output = self.attn1(norm_hidden_states, rotary_emb, self_attn_metadata)
         hidden_states = (hidden_states + attn_output * gate_msa).type_as(hidden_states)
 
@@ -1044,8 +1048,16 @@ class WanTransformer3DModel(nn.Module):
             )
 
         # Transformer blocks
+        vsa_dit_seq_shape = (post_patch_num_frames, post_patch_height, post_patch_width)
         for block in self.blocks[self.start_layer : self.end_layer]:
-            hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, hidden_states_mask)
+            hidden_states = block(
+                hidden_states,
+                encoder_hidden_states,
+                timestep_proj,
+                rotary_emb,
+                hidden_states_mask,
+                vsa_dit_seq_shape,
+            )
 
         if not is_pipeline_last_stage():
             # Non-last PP stage: hand the token sequence to the caller via IntermediateTensors.
