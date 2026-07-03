@@ -203,7 +203,7 @@ class FastVideoVSAImpl(AttentionImpl):
         self.causal = causal
         self.qkv_layout = qkv_layout
 
-        self.topk = int(backend_kwargs.get("topk", 32))
+        self.topk = int(backend_kwargs.get("topk", 64))
         self.block_size = self._parse_block_size(backend_kwargs.get("block_size", (4, 8, 8)))
         self.block_elements = self.block_size[0] * self.block_size[1] * self.block_size[2]
         self.min_seq_len = int(backend_kwargs.get("min_seq_len", self.block_elements * 2))
