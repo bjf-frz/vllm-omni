@@ -51,21 +51,23 @@ def _timings() -> DiffusionStepTimings:
     )
 
 
-def test_formatter_preserves_single_video_audio_actions_and_custom_output(
+def test_formatter_preserves_single_video_audio_actions_and_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(output_formatter, "supports_audio_output", lambda _: False)
-    custom_output = {"from_output": "kept"}
     postprocess_output = normalize_diffusion_postprocess_output(
         {
-            "video": ["frame-0"],
-            "audio": "audio-0",
-            "actions": "action-0",
-            "custom_output": {"from_postprocess": "merged"},
-            "audio_sample_rate": 48000,
-            "fps": 24.0,
-        },
-        custom_output,
+            "payload": {
+                "video": ["frame-0"],
+                "audio": "audio-0",
+                "actions": "action-0",
+            },
+            "metadata": {
+                "audio": {"sample_rate": 48000},
+                "video": {"fps": 24.0},
+                "actions": {"action_mode": "policy"},
+            },
+        }
     )
 
     results = format_diffusion_outputs(
@@ -73,7 +75,6 @@ def test_formatter_preserves_single_video_audio_actions_and_custom_output(
         od_config=_config(),
         diffusion_output=DiffusionOutput(
             output=None,
-            custom_output=custom_output,
             stage_durations={"execute": 1.25},
             peak_memory_mb=321.0,
         ),
@@ -87,12 +88,12 @@ def test_formatter_preserves_single_video_audio_actions_and_custom_output(
     assert result.images == ["frame-0"]
     assert result.prompt == "prompt-0"
     assert result.final_output_type == "image"
-    assert result.custom_output == {
-        "from_output": "kept",
-        "from_postprocess": "merged",
-    }
-    assert custom_output == {"from_output": "kept"}
     assert result.multimodal_output == {
+        "metadata": {
+            "audio": {"sample_rate": 48000},
+            "video": {"fps": 24.0},
+            "actions": {"action_mode": "policy"},
+        },
         "audio": "audio-0",
         "audio_sample_rate": 48000,
         "fps": 24.0,
@@ -110,18 +111,75 @@ def test_formatter_preserves_single_video_audio_actions_and_custom_output(
     }
 
 
-def test_formatter_preserves_text_custom_output(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_formatter_normalizes_payload_metadata_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(output_formatter, "supports_audio_output", lambda _: False)
     postprocess_output = normalize_diffusion_postprocess_output(
-        "caption",
-        {"text_output": "caption"},
+        {
+            "payload": {
+                "video": ["frame-0"],
+                "actions": "action-0",
+            },
+            "metadata": {
+                "actions": {
+                    "raw_action_dim": 2,
+                    "action_mode": "policy",
+                    "domain_id": 7,
+                },
+                "common": {
+                    "action_only_output": True,
+                },
+                "internal": {
+                    "robolab_action_postprocess": object(),
+                },
+            },
+        }
+    )
+
+    assert postprocess_output.outputs == ["frame-0"]
+    assert postprocess_output.action_payload == "action-0"
+    assert postprocess_output.metadata == {
+        "actions": {
+            "raw_action_dim": 2,
+            "action_mode": "policy",
+            "domain_id": 7,
+        },
+        "common": {
+            "action_only_output": True,
+        },
+    }
+    assert "internal" not in postprocess_output.metadata
+
+    [result] = format_diffusion_outputs(
+        request=_request("prompt-0"),
+        od_config=_config(),
+        diffusion_output=DiffusionOutput(output=None),
+        output_data={"raw": "output"},
+        postprocess_output=postprocess_output,
+        timings=_timings(),
+    )
+
+    assert result.multimodal_output == {
+        "metadata": postprocess_output.metadata,
+        "actions": "action-0",
+    }
+
+
+def test_formatter_preserves_text_envelope_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(output_formatter, "supports_audio_output", lambda _: False)
+    postprocess_output = normalize_diffusion_postprocess_output(
+        {
+            "payload": {"text": "caption"},
+            "metadata": {"text": {"text_output": "caption"}},
+        }
     )
 
     [result] = format_diffusion_outputs(
         request=_request("describe this"),
         od_config=_config(),
-        diffusion_output=DiffusionOutput(output="caption"),
-        output_data="caption",
+        diffusion_output=DiffusionOutput(output=None),
+        output_data={"payload": {"text": "caption"}},
         postprocess_output=postprocess_output,
         timings=_timings(),
     )
@@ -129,7 +187,10 @@ def test_formatter_preserves_text_custom_output(monkeypatch: pytest.MonkeyPatch)
     assert result.images == []
     assert result.prompt == "describe this"
     assert result.final_output_type == "text"
-    assert result.custom_output == {"text_output": "caption"}
+    assert result.multimodal_output == {
+        "metadata": {"text": {"text_output": "caption"}},
+        "text": "caption",
+    }
 
 
 def test_formatter_preserves_audio_output_with_model_sample_rate_fallback(
@@ -144,7 +205,7 @@ def test_formatter_preserves_audio_output_with_model_sample_rate_fallback(
         "_try_load_model_cls",
         lambda _: AudioModel,
     )
-    postprocess_output = normalize_diffusion_postprocess_output(["waveform"], {})
+    postprocess_output = normalize_diffusion_postprocess_output(["waveform"])
 
     [result] = format_diffusion_outputs(
         request=_request("speak"),
@@ -175,8 +236,7 @@ def test_formatter_preserves_audio_model_video_audio_and_actions(
             "actions": "action-0",
             "audio_sample_rate": 16000,
             "fps": 30.0,
-        },
-        {},
+        }
     )
 
     [result] = format_diffusion_outputs(
@@ -207,8 +267,7 @@ def test_formatter_preserves_audio_only_postprocess_dict(
         {
             "audio": "waveform",
             "audio_sample_rate": 24000,
-        },
-        {},
+        }
     )
 
     [result] = format_diffusion_outputs(
@@ -238,7 +297,7 @@ def test_formatter_preserves_single_prompt_multiple_audio_outputs(
         "_try_load_model_cls",
         lambda _: None,
     )
-    postprocess_output = normalize_diffusion_postprocess_output(["waveform-0", "waveform-1"], {})
+    postprocess_output = normalize_diffusion_postprocess_output(["waveform-0", "waveform-1"])
 
     [result] = format_diffusion_outputs(
         request=_request("speak", num_outputs_per_prompt=2),
@@ -264,10 +323,8 @@ def test_formatter_preserves_single_prompt_audio_and_action_payloads(
             "video": ["frame-0", "frame-1"],
             "audio": ["audio-0", "audio-1"],
             "actions": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
-            "custom_output": {"shared": True},
             "fps": 12.5,
-        },
-        {},
+        }
     )
 
     results = format_diffusion_outputs(
@@ -282,7 +339,6 @@ def test_formatter_preserves_single_prompt_audio_and_action_payloads(
     assert len(results) == 1
     assert results[0].images == ["frame-0", "frame-1"]
     assert results[0].prompt == "prompt-0"
-    assert results[0].custom_output == {"shared": True}
     assert results[0].multimodal_output["audio"] == ["audio-0", "audio-1"]
     assert results[0].multimodal_output["fps"] == 12.5
     torch.testing.assert_close(

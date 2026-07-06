@@ -225,8 +225,10 @@ class OmniOpenAIServingVideo:
         )
 
         result = await self._run_generation(prompt, gen_params, reference_id)
-        custom_output = self._extract_custom_output(result)
-        action_only = isinstance(custom_output, dict) and bool(custom_output.get("action_only_output"))
+        multimodal_output = self._extract_multimodal_output(result)
+        metadata = multimodal_output.get("metadata") if isinstance(multimodal_output, dict) else {}
+        common_metadata = metadata.get("common") if isinstance(metadata, dict) else {}
+        action_only = bool(isinstance(common_metadata, dict) and common_metadata.get("action_only_output"))
         videos = [{"action_only_output": True}] if action_only else self._extract_video_outputs(result)
         audios = self._extract_audio_outputs(result, expected_count=len(videos))
         actions = self._extract_action_outputs(result, expected_count=len(videos))
@@ -341,9 +343,11 @@ class OmniOpenAIServingVideo:
 
     @staticmethod
     def _resolve_video_fps_multiplier(result: Any) -> int:
-        custom_output = OmniOpenAIServingVideo._extract_custom_output(result)
-        if isinstance(custom_output, dict):
-            multiplier = custom_output.get("video_fps_multiplier")
+        multimodal_output = OmniOpenAIServingVideo._extract_multimodal_output(result)
+        metadata = multimodal_output.get("metadata") if isinstance(multimodal_output, dict) else None
+        video_metadata = metadata.get("video") if isinstance(metadata, dict) else None
+        if isinstance(video_metadata, dict):
+            multiplier = video_metadata.get("video_fps_multiplier")
             if multiplier is not None:
                 return int(multiplier)
         return 1
@@ -529,34 +533,37 @@ class OmniOpenAIServingVideo:
 
     @classmethod
     def _extract_action_outputs(cls, result: Any, expected_count: int) -> list[VideoAction | None]:
-        custom_output = cls._extract_custom_output(result)
-        if not custom_output or "action" not in custom_output:
-            return [None] * expected_count
+        multimodal_output = cls._extract_multimodal_output(result)
+        if isinstance(multimodal_output, dict) and "actions" in multimodal_output:
+            action_payload = multimodal_output["actions"]
+            metadata = multimodal_output.get("metadata")
+            action_metadata = metadata.get("actions") if isinstance(metadata, dict) else {}
+            action_metadata = action_metadata if isinstance(action_metadata, dict) else {}
+            action_items = cls._split_action_payload(action_payload, expected_count)
+            return [
+                cls._make_video_action(action_item, action_metadata) if action_item is not None else None
+                for action_item in action_items
+            ]
 
-        action_payload = custom_output.get("actions", custom_output["action"])
-        action_items = cls._split_action_payload(action_payload, expected_count)
-        return [
-            cls._make_video_action(action_item, custom_output) if action_item is not None else None
-            for action_item in action_items
-        ]
+        return [None] * expected_count
 
     @staticmethod
-    def _extract_custom_output(result: Any) -> dict[str, Any]:
-        custom_output = getattr(result, "custom_output", None)
-        if isinstance(custom_output, dict):
-            return custom_output
+    def _extract_multimodal_output(result: Any) -> dict[str, Any]:
+        multimodal_output = getattr(result, "multimodal_output", None)
+        if isinstance(multimodal_output, dict):
+            return multimodal_output
 
         request_output = getattr(result, "request_output", None)
         if isinstance(request_output, dict):
-            custom_output = request_output.get("custom_output")
-            if custom_output is None:
-                custom_output = request_output.get("_custom_output")
+            multimodal_output = request_output.get("multimodal_output")
+            if multimodal_output is None:
+                multimodal_output = request_output.get("_multimodal_output")
         elif request_output is not None:
-            custom_output = getattr(request_output, "custom_output", None)
-            if custom_output is None:
-                custom_output = getattr(request_output, "_custom_output", None)
+            multimodal_output = getattr(request_output, "multimodal_output", None)
+            if multimodal_output is None:
+                multimodal_output = getattr(request_output, "_multimodal_output", None)
 
-        return custom_output if isinstance(custom_output, dict) else {}
+        return multimodal_output if isinstance(multimodal_output, dict) else {}
 
     @classmethod
     def _split_action_payload(cls, action: Any, expected_count: int) -> list[Any | None]:
@@ -573,19 +580,19 @@ class OmniOpenAIServingVideo:
         return [action] + [None] * (expected_count - 1)
 
     @classmethod
-    def _make_video_action(cls, action: Any, custom_output: dict[str, Any]) -> VideoAction:
+    def _make_video_action(cls, action: Any, action_metadata: dict[str, Any]) -> VideoAction:
         data = cls._to_jsonable(action)
         if not isinstance(data, list):
             data = [data]
 
-        action_mode = custom_output.get("action_mode")
+        action_mode = action_metadata.get("action_mode")
         return VideoAction(
             data=data,
             shape=cls._shape_of(action),
             dtype=cls._dtype_of(action),
-            raw_action_dim=cls._coerce_optional_int(custom_output.get("raw_action_dim")),
+            raw_action_dim=cls._coerce_optional_int(action_metadata.get("raw_action_dim")),
             action_mode=str(action_mode) if action_mode is not None else None,
-            domain_id=cls._coerce_optional_int(custom_output.get("domain_id")),
+            domain_id=cls._coerce_optional_int(action_metadata.get("domain_id")),
         )
 
     @staticmethod

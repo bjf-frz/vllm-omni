@@ -739,8 +739,10 @@ class BagelPipeline(nn.Module, SupportsComponentDiscovery, DiffusionPipelineProf
                         text_output = text_output.split("<|im_start|>")[-1]
 
             return DiffusionOutput(
-                output=text_output,
-                custom_output={"text_output": text_output},
+                output={
+                    "payload": {"text": text_output},
+                    "metadata": {"text": {"text_output": text_output}},
+                },
                 stage_durations=self.stage_durations if hasattr(self, "stage_durations") else None,
             )
 
@@ -847,22 +849,19 @@ class BagelPipeline(nn.Module, SupportsComponentDiscovery, DiffusionPipelineProf
         if trajectory_log_probs:
             trajectory_log_probs_stacked = torch.stack(trajectory_log_probs)
 
-        custom = {}
+        metadata = {}
         if think_text is not None:
-            custom["think_text"] = think_text
-        # Mirror the PIL image into ``custom_output`` so callers reading via
-        # the orchestrator IPC boundary (which strips the bare ``output``
-        # field) can still recover the result.  ``video_frames`` already
-        # uses this pattern.
-        custom["image"] = img
+            metadata["text"] = {"think_text": think_text}
 
         return DiffusionOutput(
-            output=img,
+            output={
+                "payload": {"image": img},
+                "metadata": metadata,
+            },
             trajectory_latents=trajectory_latents_stacked,
             trajectory_timesteps=trajectory_timesteps_stacked,
             trajectory_log_probs=trajectory_log_probs_stacked,
             trajectory_decoded=trajectory_decoded,
-            custom_output=custom,
             stage_durations=self.stage_durations if hasattr(self, "stage_durations") else None,
         )
 

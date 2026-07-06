@@ -326,7 +326,7 @@ class FlowMatchingAudioPipeline(
         req: OmniDiffusionRequest,
         *,
         kind: str,
-        custom_output_key: str,
+        metadata_key: str,
         infer_batch_fn: Callable[..., tuple[torch.Tensor, int]],
         prepare_extra_args: Callable[[dict[str, Any], Any], dict[str, Any]] | None = None,
     ) -> DiffusionOutput:
@@ -353,7 +353,9 @@ class FlowMatchingAudioPipeline(
             )
 
         return DiffusionOutput(
-            output=audio,
-            custom_output={custom_output_key: pitch_shift},
+            output={
+                "payload": {"audio": audio},
+                "metadata": {"audio": {metadata_key: pitch_shift}},
+            },
             stage_durations=self._profiler_stage_durations() or {},
         )

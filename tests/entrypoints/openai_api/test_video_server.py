@@ -1034,6 +1034,33 @@ def test_action_extraction_accepts_unbatched_action():
     assert actions[0].shape == [2, 2]
 
 
+def test_action_extraction_accepts_multimodal_actions_payload():
+    import numpy as np
+
+    result = MockVideoResult([object()])
+    result.multimodal_output.update(
+        {
+            "actions": np.array([[[1.0, 2.0], [3.0, 4.0]]], dtype=np.float32),
+            "metadata": {
+                "actions": {
+                    "raw_action_dim": 2,
+                    "action_mode": "policy",
+                    "domain_id": 7,
+                },
+            },
+        }
+    )
+
+    actions = OmniOpenAIServingVideo._extract_action_outputs(result, expected_count=1)
+
+    assert actions[0] is not None
+    assert actions[0].data == [[1.0, 2.0], [3.0, 4.0]]
+    assert actions[0].shape == [2, 2]
+    assert actions[0].raw_action_dim == 2
+    assert actions[0].action_mode == "policy"
+    assert actions[0].domain_id == 7
+
+
 def test_missing_handler_returns_503():
     app = FastAPI()
     app.include_router(router)

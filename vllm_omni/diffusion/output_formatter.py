@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
@@ -25,7 +25,7 @@ class DiffusionStepTimings:
 @dataclass(frozen=True)
 class DiffusionPostprocessOutput:
     outputs: Any
-    custom_output: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
     audio_payload: Any | None = None
     action_payload: Any | None = None
     audio_sample_rate: int | None = None
@@ -33,36 +33,79 @@ class DiffusionPostprocessOutput:
     has_video_payload: bool = False
 
 
+def _is_output_envelope(outputs: Any) -> bool:
+    return isinstance(outputs, dict) and isinstance(outputs.get("payload"), dict)
+
+
+def _public_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in metadata.items() if key != "internal"}
+
+
 def normalize_diffusion_postprocess_output(
     outputs: Any,
-    custom_output: dict[str, Any],
 ) -> DiffusionPostprocessOutput:
-    """Normalize the legacy postprocess dict shape used by diffusion models.
-
-    The returned envelope owns a shallow merged copy of ``custom_output`` so
-    postprocess values keep legacy override precedence without mutating the
-    caller-owned dict.
-    """
+    """Normalize diffusion postprocess output into payload and metadata."""
 
     audio_payload = None
     action_payload = None
     audio_sample_rate = None
     fps = None
     has_video_payload = False
-    merged_custom_output = dict(custom_output)
+
+    if _is_output_envelope(outputs):
+        payload = outputs.get("payload") or {}
+        metadata = outputs.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        has_video_payload = "video" in payload
+        audio_payload = payload.get("audio")
+        action_payload = payload.get("actions")
+
+        audio_metadata = metadata.get("audio")
+        if isinstance(audio_metadata, dict):
+            audio_sample_rate = audio_metadata.get("sample_rate")
+        video_metadata = metadata.get("video")
+        if isinstance(video_metadata, dict):
+            fps = video_metadata.get("fps")
+
+        public_metadata = _public_metadata(metadata)
+        if "text" in payload and "text" not in public_metadata:
+            public_metadata = {**public_metadata, "text": {}}
+
+        if "video" in payload:
+            outputs = payload["video"]
+        elif "image" in payload:
+            outputs = payload["image"]
+        elif "text" in payload:
+            outputs = payload["text"]
+        elif action_payload is not None:
+            outputs = []
+        elif not payload:
+            outputs = []
+        else:
+            outputs = payload
+
+        return DiffusionPostprocessOutput(
+            outputs=outputs,
+            metadata=public_metadata,
+            audio_payload=audio_payload,
+            action_payload=action_payload,
+            audio_sample_rate=audio_sample_rate,
+            fps=fps,
+            has_video_payload=has_video_payload,
+        )
 
     if isinstance(outputs, dict):
         has_video_payload = "video" in outputs
         audio_payload = outputs.get("audio")
         action_payload = outputs.get("actions")
-        merged_custom_output.update(outputs.get("custom_output") or {})
         audio_sample_rate = outputs.get("audio_sample_rate")
         fps = outputs.get("fps")
         outputs = outputs.get("video", outputs)
 
     return DiffusionPostprocessOutput(
         outputs=outputs,
-        custom_output=merged_custom_output,
         audio_payload=audio_payload,
         action_payload=action_payload,
         audio_sample_rate=audio_sample_rate,
@@ -112,7 +155,7 @@ def format_diffusion_outputs(
     # Detect text output: when the pipeline returns a string (e.g.,
     # SenseNova-U1 / BAGEL single-stage img2text / text2text), wrap it
     # as a text-type response instead of an image.
-    is_text_output = isinstance(output_data, str) and postprocess_output.custom_output.get("text_output") is not None
+    is_text_output = "text" in postprocess_output.metadata
 
     is_audio_output = supports_audio_output(od_config.model_class_name)
     audio_sample_rate = postprocess_output.audio_sample_rate
@@ -140,8 +183,14 @@ def _ensure_list(outputs: Any) -> list[Any]:
     return [outputs] if outputs is not None else []
 
 
-def _format_audio_multimodal_output(payload: Any, audio_sample_rate: int | None) -> dict[str, Any]:
+def _format_audio_multimodal_output(
+    payload: Any,
+    audio_sample_rate: int | None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     mm_output: dict[str, Any] = {"audio": payload}
+    if metadata:
+        mm_output["metadata"] = metadata
     if audio_sample_rate is not None:
         mm_output["audio_sample_rate"] = audio_sample_rate
     return mm_output
@@ -150,6 +199,7 @@ def _format_audio_multimodal_output(payload: Any, audio_sample_rate: int | None)
 def _has_non_audio_postprocess_payload(postprocess_output: DiffusionPostprocessOutput) -> bool:
     return (
         postprocess_output.has_video_payload
+        or "text" in postprocess_output.metadata
         or postprocess_output.action_payload is not None
         or postprocess_output.fps is not None
     )
@@ -160,6 +210,8 @@ def _build_multimodal_output(
     audio_sample_rate: int | None,
 ) -> dict[str, Any]:
     mm_output: dict[str, Any] = {}
+    if postprocess_output.metadata:
+        mm_output["metadata"] = postprocess_output.metadata
     if postprocess_output.audio_payload is not None:
         mm_output["audio"] = postprocess_output.audio_payload
     if audio_sample_rate is not None:
@@ -186,6 +238,8 @@ def _format_single_prompt_output(
 ) -> list[OmniRequestOutput]:
     request_id = request.request_id
     mm_output = _build_multimodal_output(postprocess_output, audio_sample_rate)
+    if is_text_output:
+        mm_output["text"] = outputs[0] if len(outputs) == 1 else outputs
 
     if is_text_output:
         return [
@@ -194,7 +248,6 @@ def _format_single_prompt_output(
                 images=[],
                 prompt=prompt,
                 metrics=metrics,
-                custom_output=postprocess_output.custom_output,
                 multimodal_output=mm_output,
                 final_output_type="text",
                 stage_durations=diffusion_output.stage_durations,
@@ -221,6 +274,7 @@ def _format_single_prompt_output(
                 multimodal_output=_format_audio_multimodal_output(
                     request_audio_payload,
                     audio_sample_rate,
+                    postprocess_output.metadata,
                 ),
                 final_output_type="audio",
                 stage_durations=diffusion_output.stage_durations,
@@ -240,7 +294,6 @@ def _format_single_prompt_output(
             trajectory_timesteps=diffusion_output.trajectory_timesteps,
             trajectory_log_probs=diffusion_output.trajectory_log_probs,
             trajectory_decoded=diffusion_output.trajectory_decoded,
-            custom_output=postprocess_output.custom_output,
             multimodal_output=mm_output,
             stage_durations=diffusion_output.stage_durations,
             peak_memory_mb=diffusion_output.peak_memory_mb,

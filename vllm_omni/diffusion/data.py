@@ -1196,10 +1196,6 @@ class DiffusionOutput:
 
     post_process_func: Callable[..., Any] | None = None
 
-    # Extra custom output data (e.g. latent trajectories, prompt embeds)
-    # passed through to OmniRequestOutput.custom_output
-    custom_output: dict[str, Any] = field(default_factory=dict)
-
     # logged timings info, directly from Req.timings
     # timings: Optional["RequestTimings"] = None
 
@@ -1214,10 +1210,9 @@ class DiffusionOutput:
     # memory usage info
     peak_memory_mb: float = 0.0
 
-    # When True, move all tensor fields (including tensors inside
-    # ``custom_output``) to CPU at construction time. Useful when the output
-    # is shipped across process boundaries (e.g. step-execution mode) and the
-    # receiving side must not initialise a stray CUDA context.
+    # When True, move tensor fields to CPU at construction time. Useful when
+    # the output is shipped across process boundaries (e.g. step-execution
+    # mode) and the receiving side must not initialise a stray CUDA context.
     to_cpu: bool = False
 
     def __post_init__(self) -> None:
@@ -1227,14 +1222,18 @@ class DiffusionOutput:
         def _maybe_to_cpu(value: Any) -> Any:
             if isinstance(value, torch.Tensor):
                 return value.detach().cpu()
+            if isinstance(value, dict):
+                return {key: _maybe_to_cpu(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [_maybe_to_cpu(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(_maybe_to_cpu(item) for item in value)
             return value
 
         self.output = _maybe_to_cpu(self.output)
         self.trajectory_timesteps = _maybe_to_cpu(self.trajectory_timesteps)
         self.trajectory_latents = _maybe_to_cpu(self.trajectory_latents)
         self.trajectory_log_probs = _maybe_to_cpu(self.trajectory_log_probs)
-        if self.custom_output:
-            self.custom_output = {k: _maybe_to_cpu(v) for k, v in self.custom_output.items()}
 
     @classmethod
     def from_exception(cls, exc: BaseException) -> "DiffusionOutput":

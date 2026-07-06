@@ -97,6 +97,15 @@ def get_soulxsinger_post_process_func(od_config: OmniDiffusionConfig):
     """Convert pipeline audio tensor output for offline consumers."""
 
     def post_process_func(audio: torch.Tensor):
+        if isinstance(audio, dict) and isinstance(audio.get("payload"), dict):
+            payload = dict(audio["payload"])
+            audio_payload = payload.get("audio")
+            if isinstance(audio_payload, torch.Tensor):
+                payload["audio"] = audio_payload.detach().cpu().float().numpy()
+            return {
+                "payload": payload,
+                "metadata": audio.get("metadata") or {},
+            }
         return audio.detach().cpu().float().numpy()
 
     return post_process_func
@@ -343,7 +352,7 @@ class PipelineSoulXSingerSVS(FlowMatchingAudioPipeline):
         return self._forward_batch_from_request(
             req,
             kind="svs",
-            custom_output_key="f0_shift",
+            metadata_key="f0_shift",
             infer_batch_fn=self.infer_svs_batch,
             prepare_extra_args=lambda extra_args, _sampling: normalize_svs_control_extra_args(extra_args),
         )
