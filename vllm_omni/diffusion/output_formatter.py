@@ -8,6 +8,11 @@ from typing import Any
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.io_support import supports_audio_output
+from vllm_omni.diffusion.output_metadata import (
+    strip_internal_metadata,
+    validate_diffusion_metadata,
+    validate_public_diffusion_metadata,
+)
 from vllm_omni.diffusion.registry import DiffusionModelRegistry
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniPromptType
@@ -37,10 +42,6 @@ def _is_output_envelope(outputs: Any) -> bool:
     return isinstance(outputs, dict) and isinstance(outputs.get("payload"), dict)
 
 
-def _public_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in metadata.items() if key != "internal"}
-
-
 def normalize_diffusion_postprocess_output(
     outputs: Any,
 ) -> DiffusionPostprocessOutput:
@@ -57,6 +58,7 @@ def normalize_diffusion_postprocess_output(
         metadata = outputs.get("metadata") or {}
         if not isinstance(metadata, dict):
             metadata = {}
+        validate_diffusion_metadata(metadata)
 
         has_video_payload = "video" in payload
         audio_payload = payload.get("audio")
@@ -69,9 +71,10 @@ def normalize_diffusion_postprocess_output(
         if isinstance(video_metadata, dict):
             fps = video_metadata.get("fps")
 
-        public_metadata = _public_metadata(metadata)
+        public_metadata = strip_internal_metadata(metadata)
         if "text" in payload and "text" not in public_metadata:
             public_metadata = {**public_metadata, "text": {}}
+        validate_public_diffusion_metadata(public_metadata)
 
         if "video" in payload:
             outputs = payload["video"]
