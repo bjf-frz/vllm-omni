@@ -30,6 +30,7 @@ is produced from sound latents rather than from ``multi_modal_data["audio"]``.
 from __future__ import annotations
 
 import math
+import os
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import fields
