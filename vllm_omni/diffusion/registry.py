@@ -576,6 +576,7 @@ def register_diffusion_model(
     pre_process_func_name: str | None = None,
     post_process_func_name: str | None = None,
     ir_op_priority_func_name: str | None = None,
+    action_post_process_func_name: str | None = None,
 ) -> None:
     """Register a diffusion model pipeline from an out-of-tree plugin.
 
@@ -597,7 +598,20 @@ def register_diffusion_model(
         ir_op_priority_func_name: Optional name of the IR op priority merge
             function located in *module_name*. Pass ``None`` to keep the
             existing entry when replacing a built-in model.
+        action_post_process_func_name: Deprecated compatibility-only keyword
+            for out-of-tree plugins. Action postprocess hooks are no longer
+            registered separately; move action handling into
+            ``post_process_func_name`` and return a payload/metadata envelope.
     """
+    if action_post_process_func_name is not None:
+        logger.warning(
+            "Ignoring deprecated action_post_process_func_name=%r for diffusion "
+            "model %s. Move action postprocess logic into post_process_func_name "
+            "and return payload/metadata output.",
+            action_post_process_func_name,
+            model_arch,
+        )
+
     # Register model class in DiffusionModelRegistry
     DiffusionModelRegistry.register_model(
         model_arch,

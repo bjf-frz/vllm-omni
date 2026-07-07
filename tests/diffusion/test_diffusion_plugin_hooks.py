@@ -92,6 +92,19 @@ class TestRegisterDiffusionModel:
         assert _DIFFUSION_POST_PROCESS_FUNCS["TestPipeline"] == "test_post_process"
         assert _DIFFUSION_IR_OP_PRIORITY_FUNCS["TestPipeline"] == "test_ir_op_priority"
 
+    def test_register_model_accepts_deprecated_action_postprocess_keyword(self):
+        """Deprecated action hook keyword is accepted but not registered."""
+        register_diffusion_model(
+            model_arch="LegacyActionPipeline",
+            module_name="test_plugin.diffusion.pipeline",
+            class_name="LegacyActionPipeline",
+            post_process_func_name="test_post_process",
+            action_post_process_func_name="test_action_post_process",
+        )
+
+        assert "LegacyActionPipeline" in _DIFFUSION_MODELS
+        assert _DIFFUSION_POST_PROCESS_FUNCS["LegacyActionPipeline"] == "test_post_process"
+
 
 class TestWorkerUsesHook:
     """Test that DiffusionWorker resolves model runner via platform hook."""
