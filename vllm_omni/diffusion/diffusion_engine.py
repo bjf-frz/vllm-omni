@@ -295,7 +295,7 @@ class DiffusionEngine:
         if self.post_process_func is not None:
             # Some video pipelines need request-level controls during
             # postprocess (for example worker-side frame interpolation).
-            postprocess_kwargs: dict[str, Any] = {}
+            postprocess_kwargs: dict[str, object] = {}
             if self._post_process_accepts_sampling_params:
                 postprocess_kwargs["sampling_params"] = request.sampling_params
             outputs = self.post_process_func(output_data, **postprocess_kwargs)

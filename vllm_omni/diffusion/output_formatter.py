@@ -4,11 +4,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TypeGuard
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.io_support import supports_audio_output
 from vllm_omni.diffusion.output_metadata import (
+    DiffusionMetadata,
+    DiffusionMultimodalOutput,
+    DiffusionOutputEnvelope,
+    DiffusionPayload,
+    DiffusionPayloadValue,
+    DiffusionPostprocessRawOutput,
     strip_internal_metadata,
     validate_diffusion_metadata,
     validate_public_diffusion_metadata,
@@ -29,21 +35,21 @@ class DiffusionStepTimings:
 
 @dataclass(frozen=True)
 class DiffusionPostprocessOutput:
-    outputs: Any
-    metadata: dict[str, Any] = field(default_factory=dict)
-    audio_payload: Any | None = None
-    action_payload: Any | None = None
+    outputs: DiffusionPayloadValue
+    metadata: DiffusionMetadata = field(default_factory=dict)
+    audio_payload: DiffusionPayloadValue | None = None
+    action_payload: DiffusionPayloadValue | None = None
     audio_sample_rate: int | None = None
     fps: float | None = None
     has_video_payload: bool = False
 
 
-def _is_output_envelope(outputs: Any) -> bool:
+def _is_output_envelope(outputs: DiffusionPostprocessRawOutput) -> TypeGuard[DiffusionOutputEnvelope]:
     return isinstance(outputs, dict) and isinstance(outputs.get("payload"), dict)
 
 
 def normalize_diffusion_postprocess_output(
-    outputs: Any,
+    outputs: DiffusionPostprocessRawOutput,
 ) -> DiffusionPostprocessOutput:
     """Normalize diffusion postprocess output into payload and metadata."""
 
@@ -54,7 +60,7 @@ def normalize_diffusion_postprocess_output(
     has_video_payload = False
 
     if _is_output_envelope(outputs):
-        payload = outputs.get("payload") or {}
+        payload: DiffusionPayload = outputs.get("payload") or {}
         metadata = outputs.get("metadata") or {}
         if not isinstance(metadata, dict):
             metadata = {}
@@ -139,7 +145,7 @@ def format_diffusion_outputs(
     request: OmniDiffusionRequest,
     od_config: OmniDiffusionConfig,
     diffusion_output: DiffusionOutput,
-    output_data: Any,
+    output_data: DiffusionPostprocessRawOutput,
     postprocess_output: DiffusionPostprocessOutput,
     timings: DiffusionStepTimings,
 ) -> list[OmniRequestOutput]:
@@ -180,18 +186,18 @@ def format_diffusion_outputs(
     )
 
 
-def _ensure_list(outputs: Any) -> list[Any]:
+def _ensure_list(outputs: DiffusionPayloadValue) -> list[DiffusionPayloadValue]:
     if isinstance(outputs, list):
         return outputs
     return [outputs] if outputs is not None else []
 
 
 def _format_audio_multimodal_output(
-    payload: Any,
+    payload: DiffusionPayloadValue,
     audio_sample_rate: int | None,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    mm_output: dict[str, Any] = {"audio": payload}
+    metadata: DiffusionMetadata | None = None,
+) -> DiffusionMultimodalOutput:
+    mm_output: DiffusionMultimodalOutput = {"audio": payload}
     if metadata:
         mm_output["metadata"] = metadata
     if audio_sample_rate is not None:
@@ -211,8 +217,8 @@ def _has_non_audio_postprocess_payload(postprocess_output: DiffusionPostprocessO
 def _build_multimodal_output(
     postprocess_output: DiffusionPostprocessOutput,
     audio_sample_rate: int | None,
-) -> dict[str, Any]:
-    mm_output: dict[str, Any] = {}
+) -> DiffusionMultimodalOutput:
+    mm_output: DiffusionMultimodalOutput = {}
     if postprocess_output.metadata:
         mm_output["metadata"] = postprocess_output.metadata
     if postprocess_output.audio_payload is not None:
@@ -231,8 +237,8 @@ def _format_single_prompt_output(
     request: OmniDiffusionRequest,
     prompt: OmniPromptType,
     diffusion_output: DiffusionOutput,
-    outputs: list[Any],
-    metrics: dict[str, Any],
+    outputs: list[DiffusionPayloadValue],
+    metrics: dict[str, object],
     postprocess_output: DiffusionPostprocessOutput,
     is_text_output: bool,
     is_audio_output: bool,

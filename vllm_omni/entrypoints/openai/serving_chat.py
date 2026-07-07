@@ -93,6 +93,7 @@ from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from vllm_omni.diffusion.output_metadata import DiffusionMetadataMapping, DiffusionMetadataValue
 from vllm_omni.entrypoints.openai.audio_utils_mixin import AudioMixin
 from vllm_omni.entrypoints.openai.image_api_utils import encode_image_base64_with_compression, validate_layered_layers
 from vllm_omni.entrypoints.openai.protocol import OmniChatCompletionStreamResponse
@@ -195,10 +196,10 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
 
     def _get_diffusion_extra_output_params(
         self,
-        output: Any,
-    ) -> dict[str, Any] | None:
+        output: object,
+    ) -> dict[str, DiffusionMetadataValue] | None:
         """Pick model-specific extra output keys from diffusion metadata."""
-        metadata: dict[str, Any] = {}
+        metadata: DiffusionMetadataMapping = {}
         mm_output = getattr(output, "multimodal_output", None)
         if isinstance(mm_output, dict):
             raw_metadata = mm_output.get("metadata")
@@ -217,7 +218,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
 
         if not self._diffusion_extra_output_params:
             return None
-        flat_metadata: dict[str, Any] = {}
+        flat_metadata: dict[str, DiffusionMetadataValue] = {}
         for section in metadata.values():
             if isinstance(section, dict):
                 flat_metadata.update(section)
@@ -225,7 +226,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         return out or None
 
     @staticmethod
-    def _get_diffusion_text_output(output: Any) -> str:
+    def _get_diffusion_text_output(output: object) -> str:
         mm_output = getattr(output, "multimodal_output", None)
         if isinstance(mm_output, dict) and mm_output.get("text") is not None:
             return str(mm_output["text"])

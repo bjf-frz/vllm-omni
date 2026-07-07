@@ -4,12 +4,79 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TypeAlias
+from typing import TypeAlias, TypedDict
 
+import numpy as np
+import PIL.Image
 import torch
 
-DiffusionMetadata: TypeAlias = dict[str, object]
-DiffusionMetadataMapping: TypeAlias = Mapping[str, object]
+# Scalar values that may appear in either payload or metadata.
+# Examples: text_output="done", fps=16, action_only_output=True.
+DiffusionScalar: TypeAlias = str | int | float | bool | None
+
+# Shape-like metadata. Examples: [1, 16, 3, 480, 832], (16, 480, 832).
+DiffusionShape: TypeAlias = list[int] | tuple[int, ...]
+
+# Named tensor controls used by transfer-style metadata.
+# Example: {"pose": pose_tensor, "depth": depth_tensor}.
+DiffusionTensorMap: TypeAlias = Mapping[str, torch.Tensor]
+
+# Values allowed under metadata groups such as video/audio/actions/transfer.
+# Examples: {"fps": 16}, {"shape": [1, 16, 3, 480, 832]},
+# {"controls": {"pose": pose_tensor}}, {"hints": ["pose"]}.
+DiffusionMetadataValue: TypeAlias = (
+    DiffusionScalar
+    | DiffusionShape
+    | DiffusionTensorMap
+    | torch.Tensor
+    | list["DiffusionMetadataValue"]
+    | tuple["DiffusionMetadataValue", ...]
+    | Mapping[str, "DiffusionMetadataValue"]
+)
+
+# Mutable metadata envelope side. Example:
+# {"video": {"fps": 16}, "actions": {"raw_action_dim": 14}}.
+DiffusionMetadata: TypeAlias = dict[str, DiffusionMetadataValue]
+
+# Read-only metadata view for validators and serving readers.
+DiffusionMetadataMapping: TypeAlias = Mapping[str, DiffusionMetadataValue]
+
+# Concrete payload values produced by post_process.
+# Examples: PIL image, video tensor, audio bytes/tensor, action tensor.
+DiffusionPayloadValue: TypeAlias = (
+    DiffusionScalar
+    | bytes
+    | torch.Tensor
+    | np.ndarray
+    | PIL.Image.Image
+    | list["DiffusionPayloadValue"]
+    | tuple["DiffusionPayloadValue", ...]
+    | Mapping[str, "DiffusionPayloadValue"]
+)
+
+# Mutable payload side. Example: {"video": video_tensor, "action": action_tensor}.
+DiffusionPayload: TypeAlias = dict[str, DiffusionPayloadValue]
+
+# Read-only payload view for code that consumes but does not mutate payload.
+DiffusionPayloadMapping: TypeAlias = Mapping[str, DiffusionPayloadValue]
+
+# Serving-facing multimodal output. Non-metadata keys hold payload values.
+# Example: {"video": video_tensor, "metadata": {"video": {"fps": 16}}}.
+DiffusionMultimodalOutput: TypeAlias = dict[str, DiffusionPayloadValue | DiffusionMetadata]
+
+
+class DiffusionOutputEnvelope(TypedDict, total=False):
+    # Canonical post_process return shape:
+    # {"payload": {"video": video_tensor}, "metadata": {"video": {"fps": 16}}}
+    payload: DiffusionPayload
+    metadata: DiffusionMetadata
+
+
+# Raw post_process return before formatter normalization. This keeps backward
+# compatibility with direct payload returns while accepting the new envelope.
+# Examples: image, {"video": video_tensor}, or
+# {"payload": {"video": video_tensor}, "metadata": {"video": {"fps": 16}}}.
+DiffusionPostprocessRawOutput: TypeAlias = DiffusionPayloadValue | DiffusionPayload | DiffusionOutputEnvelope
 
 
 def strip_internal_metadata(metadata: DiffusionMetadataMapping) -> DiffusionMetadata:
