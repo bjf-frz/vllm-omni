@@ -1045,7 +1045,7 @@ def test_action_extraction_accepts_unbatched_action():
 
     actions = OmniOpenAIServingVideo._extract_action_outputs(result, expected_count=1)
 
-    assert actions[0] is not None
+    assert actions and actions[0] is not None
     assert actions[0].data == [[1.0, 2.0], [3.0, 4.0]]
     assert actions[0].shape == [2, 2]
 
