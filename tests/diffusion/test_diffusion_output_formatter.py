@@ -137,8 +137,11 @@ def test_formatter_normalizes_payload_metadata_envelope(
         }
     )
 
-    assert postprocess_output.outputs == ["frame-0"]
-    assert postprocess_output.action_payload == "action-0"
+    assert postprocess_output.outputs == {
+        "video": ["frame-0"],
+        "actions": "action-0",
+    }
+    assert postprocess_output.primary_key == "video"
     assert postprocess_output.metadata == {
         "actions": {
             "raw_action_dim": 2,
@@ -252,6 +255,10 @@ def test_formatter_preserves_audio_model_video_audio_and_actions(
     assert result.prompt == "watch and listen"
     assert result.final_output_type == "image"
     assert result.multimodal_output == {
+        "metadata": {
+            "audio": {"sample_rate": 16000},
+            "video": {"fps": 30.0},
+        },
         "audio": "audio-0",
         "audio_sample_rate": 16000,
         "fps": 30.0,
@@ -283,6 +290,9 @@ def test_formatter_preserves_audio_only_postprocess_dict(
     assert result.prompt == "speak"
     assert result.final_output_type == "audio"
     assert result.multimodal_output == {
+        "metadata": {
+            "audio": {"sample_rate": 24000},
+        },
         "audio": "waveform",
         "audio_sample_rate": 24000,
     }
@@ -339,6 +349,7 @@ def test_formatter_preserves_single_prompt_audio_and_action_payloads(
     assert len(results) == 1
     assert results[0].images == ["frame-0", "frame-1"]
     assert results[0].prompt == "prompt-0"
+    assert results[0].multimodal_output["metadata"] == {"video": {"fps": 12.5}}
     assert results[0].multimodal_output["audio"] == ["audio-0", "audio-1"]
     assert results[0].multimodal_output["fps"] == 12.5
     torch.testing.assert_close(

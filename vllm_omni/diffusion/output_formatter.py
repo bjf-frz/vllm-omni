@@ -35,13 +35,9 @@ class DiffusionStepTimings:
 
 @dataclass(frozen=True)
 class DiffusionPostprocessOutput:
-    outputs: DiffusionPayloadValue
+    outputs: DiffusionPayload
     metadata: DiffusionMetadata = field(default_factory=dict)
-    audio_payload: DiffusionPayloadValue | None = None
-    action_payload: DiffusionPayloadValue | None = None
-    audio_sample_rate: int | None = None
-    fps: float | None = None
-    has_video_payload: bool = False
+    primary_key: str | None = None
 
 
 def _is_output_envelope(outputs: DiffusionPostprocessRawOutput) -> TypeGuard[DiffusionOutputEnvelope]:
@@ -53,12 +49,6 @@ def normalize_diffusion_postprocess_output(
 ) -> DiffusionPostprocessOutput:
     """Normalize diffusion postprocess output into payload and metadata."""
 
-    audio_payload = None
-    action_payload = None
-    audio_sample_rate = None
-    fps = None
-    has_video_payload = False
-
     if _is_output_envelope(outputs):
         payload: DiffusionPayload = outputs.get("payload") or {}
         metadata = outputs.get("metadata") or {}
@@ -66,61 +56,58 @@ def normalize_diffusion_postprocess_output(
             metadata = {}
         validate_diffusion_metadata(metadata)
 
-        has_video_payload = "video" in payload
-        audio_payload = payload.get("audio")
-        action_payload = payload.get("actions")
-
-        audio_metadata = metadata.get("audio")
-        if isinstance(audio_metadata, dict):
-            audio_sample_rate = audio_metadata.get("sample_rate")
-        video_metadata = metadata.get("video")
-        if isinstance(video_metadata, dict):
-            fps = video_metadata.get("fps")
-
         public_metadata = strip_internal_metadata(metadata)
         if "text" in payload and "text" not in public_metadata:
             public_metadata = {**public_metadata, "text": {}}
         validate_public_diffusion_metadata(public_metadata)
 
-        if "video" in payload:
-            outputs = payload["video"]
-        elif "image" in payload:
-            outputs = payload["image"]
-        elif "text" in payload:
-            outputs = payload["text"]
-        elif action_payload is not None:
-            outputs = []
-        elif not payload:
-            outputs = []
-        else:
-            outputs = payload
-
         return DiffusionPostprocessOutput(
-            outputs=outputs,
+            outputs=payload,
             metadata=public_metadata,
-            audio_payload=audio_payload,
-            action_payload=action_payload,
-            audio_sample_rate=audio_sample_rate,
-            fps=fps,
-            has_video_payload=has_video_payload,
+            primary_key=_infer_primary_payload_key(payload),
         )
 
     if isinstance(outputs, dict):
-        has_video_payload = "video" in outputs
-        audio_payload = outputs.get("audio")
-        action_payload = outputs.get("actions")
-        audio_sample_rate = outputs.get("audio_sample_rate")
-        fps = outputs.get("fps")
-        outputs = outputs.get("video", outputs)
+        payload = {
+            key: value
+            for key, value in outputs.items()
+            if key not in {"audio_sample_rate", "fps"}
+        }
+        metadata = _metadata_from_legacy_payload(outputs)
+        if "text" in payload and "text" not in metadata:
+            metadata["text"] = {}
+        if metadata:
+            validate_public_diffusion_metadata(metadata)
+        return DiffusionPostprocessOutput(
+            outputs=payload,
+            metadata=metadata,
+            primary_key=_infer_primary_payload_key(payload),
+        )
 
     return DiffusionPostprocessOutput(
-        outputs=outputs,
-        audio_payload=audio_payload,
-        action_payload=action_payload,
-        audio_sample_rate=audio_sample_rate,
-        fps=fps,
-        has_video_payload=has_video_payload,
+        outputs={"output": outputs},
+        primary_key="output",
     )
+
+
+def _metadata_from_legacy_payload(payload: dict[str, DiffusionPayloadValue]) -> DiffusionMetadata:
+    metadata: DiffusionMetadata = {}
+    audio_sample_rate = payload.get("audio_sample_rate")
+    if audio_sample_rate is not None:
+        metadata["audio"] = {"sample_rate": audio_sample_rate}
+    fps = payload.get("fps")
+    if fps is not None:
+        metadata["video"] = {"fps": fps}
+    return metadata
+
+
+def _infer_primary_payload_key(payload: DiffusionPayload) -> str | None:
+    for key in ("video", "image", "text", "audio", "output"):
+        if key in payload:
+            return key
+    if "actions" in payload:
+        return None
+    return next(iter(payload), None)
 
 
 def format_empty_diffusion_outputs(
@@ -151,7 +138,8 @@ def format_diffusion_outputs(
 ) -> list[OmniRequestOutput]:
     """Convert a finished diffusion model output into API-facing outputs."""
 
-    outputs = _ensure_list(postprocess_output.outputs)
+    primary_payload = _primary_payload(postprocess_output)
+    outputs = _ensure_list(primary_payload)
     metrics = {
         "preprocess_time_ms": timings.preprocess_time_s * 1000,
         "diffusion_engine_exec_time_ms": timings.exec_time_s * 1000,
@@ -164,10 +152,10 @@ def format_diffusion_outputs(
     # Detect text output: when the pipeline returns a string (e.g.,
     # SenseNova-U1 / BAGEL single-stage img2text / text2text), wrap it
     # as a text-type response instead of an image.
-    is_text_output = "text" in postprocess_output.metadata
+    is_text_output = postprocess_output.primary_key == "text" or "text" in postprocess_output.metadata
 
     is_audio_output = supports_audio_output(od_config.model_class_name)
-    audio_sample_rate = postprocess_output.audio_sample_rate
+    audio_sample_rate = _metadata_audio_sample_rate(postprocess_output.metadata)
     if is_audio_output and audio_sample_rate is None:
         model_cls = DiffusionModelRegistry._try_load_model_cls(od_config.model_class_name)
         audio_sample_rate = getattr(model_cls, "audio_sample_rate", None)
@@ -192,6 +180,28 @@ def _ensure_list(outputs: DiffusionPayloadValue) -> list[DiffusionPayloadValue]:
     return [outputs] if outputs is not None else []
 
 
+def _primary_payload(postprocess_output: DiffusionPostprocessOutput) -> DiffusionPayloadValue | None:
+    if postprocess_output.primary_key is None:
+        return []
+    return postprocess_output.outputs.get(postprocess_output.primary_key)
+
+
+def _metadata_audio_sample_rate(metadata: DiffusionMetadata) -> int | None:
+    audio_metadata = metadata.get("audio")
+    if not isinstance(audio_metadata, dict):
+        return None
+    sample_rate = audio_metadata.get("sample_rate")
+    return sample_rate if isinstance(sample_rate, int) else None
+
+
+def _metadata_video_fps(metadata: DiffusionMetadata) -> float | None:
+    video_metadata = metadata.get("video")
+    if not isinstance(video_metadata, dict):
+        return None
+    fps = video_metadata.get("fps")
+    return fps if isinstance(fps, (int, float)) and not isinstance(fps, bool) else None
+
+
 def _format_audio_multimodal_output(
     payload: DiffusionPayloadValue,
     audio_sample_rate: int | None,
@@ -207,10 +217,11 @@ def _format_audio_multimodal_output(
 
 def _has_non_audio_postprocess_payload(postprocess_output: DiffusionPostprocessOutput) -> bool:
     return (
-        postprocess_output.has_video_payload
+        "video" in postprocess_output.outputs
+        or "image" in postprocess_output.outputs
         or "text" in postprocess_output.metadata
-        or postprocess_output.action_payload is not None
-        or postprocess_output.fps is not None
+        or "actions" in postprocess_output.outputs
+        or _metadata_video_fps(postprocess_output.metadata) is not None
     )
 
 
@@ -221,14 +232,13 @@ def _build_multimodal_output(
     mm_output: DiffusionMultimodalOutput = {}
     if postprocess_output.metadata:
         mm_output["metadata"] = postprocess_output.metadata
-    if postprocess_output.audio_payload is not None:
-        mm_output["audio"] = postprocess_output.audio_payload
+    for key, value in postprocess_output.outputs.items():
+        if key in {"audio", "actions"}:
+            mm_output[key] = value
     if audio_sample_rate is not None:
         mm_output["audio_sample_rate"] = audio_sample_rate
-    if postprocess_output.fps is not None:
-        mm_output["fps"] = postprocess_output.fps
-    if postprocess_output.action_payload is not None:
-        mm_output["actions"] = postprocess_output.action_payload
+    if (fps := _metadata_video_fps(postprocess_output.metadata)) is not None:
+        mm_output["fps"] = fps
     return mm_output
 
 
@@ -266,7 +276,7 @@ def _format_single_prompt_output(
         ]
 
     if is_audio_output and not _has_non_audio_postprocess_payload(postprocess_output):
-        request_audio_payload = postprocess_output.audio_payload
+        request_audio_payload = postprocess_output.outputs.get("audio")
         if request_audio_payload is None:
             request_audio_payload = outputs[0] if len(outputs) == 1 else outputs
         return [
