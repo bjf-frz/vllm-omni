@@ -68,11 +68,7 @@ def normalize_diffusion_postprocess_output(
         )
 
     if isinstance(outputs, dict):
-        payload = {
-            key: value
-            for key, value in outputs.items()
-            if key not in {"audio_sample_rate", "fps"}
-        }
+        payload = {key: value for key, value in outputs.items() if key not in {"audio_sample_rate", "fps"}}
         metadata = _metadata_from_legacy_payload(outputs)
         if "text" in payload and "text" not in metadata:
             metadata["text"] = {}
