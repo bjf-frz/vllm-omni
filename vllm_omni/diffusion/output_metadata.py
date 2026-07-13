@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 """Compatibility imports for diffusion output metadata.
 
 The shared output payload and metadata schema lives in
