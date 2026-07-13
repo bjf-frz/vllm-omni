@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TypeAlias, TypedDict
+from typing import Literal, TypeAlias, TypedDict
 
 import numpy as np
 import PIL.Image
 import torch
+
+# Final user-facing output modality returned by pipeline stages.
+FinalOutputModalityType: TypeAlias = Literal["text", "image", "audio", "video"]
 
 # Scalar values that may appear in either payload or metadata.
 # Examples: text_output="done", fps=16, action_only_output=True.
