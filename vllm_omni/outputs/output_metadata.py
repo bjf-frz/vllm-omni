@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Literal, TypeAlias, TypedDict
+from typing import Any, Literal, TypeAlias, TypedDict
 
 import numpy as np
 import PIL.Image
@@ -43,6 +43,15 @@ DiffusionMetadata: TypeAlias = dict[str, DiffusionMetadataValue]
 # Read-only metadata view for validators and serving readers.
 DiffusionMetadataMapping: TypeAlias = Mapping[str, DiffusionMetadataValue]
 
+
+class DiffusionTrajectoryPayload(TypedDict, total=False):
+    # Optional denoising trajectory payload for RL/debug consumers.
+    latents: torch.Tensor | dict[str, Any] | None
+    timesteps: torch.Tensor | dict[str, Any] | None
+    log_probs: torch.Tensor | dict[str, Any] | None
+    decoded: list[PIL.Image.Image] | None
+
+
 # Concrete payload values produced by post_process.
 # Examples: PIL image, video tensor, audio bytes/tensor, action tensor.
 DiffusionPayloadValue: TypeAlias = (
@@ -51,6 +60,7 @@ DiffusionPayloadValue: TypeAlias = (
     | torch.Tensor
     | np.ndarray
     | PIL.Image.Image
+    | DiffusionTrajectoryPayload
     | list["DiffusionPayloadValue"]
     | tuple["DiffusionPayloadValue", ...]
     | Mapping[str, "DiffusionPayloadValue"]

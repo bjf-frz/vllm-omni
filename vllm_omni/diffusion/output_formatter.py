@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TypeGuard
 
@@ -19,6 +20,7 @@ from vllm_omni.outputs.output_metadata import (
     DiffusionPayload,
     DiffusionPayloadValue,
     DiffusionPostprocessRawOutput,
+    DiffusionTrajectoryPayload,
     strip_internal_metadata,
     validate_diffusion_metadata,
     validate_public_diffusion_metadata,
@@ -101,6 +103,8 @@ def _infer_primary_payload_key(payload: DiffusionPayload) -> str | None:
     for key in ("video", "image", "text", "audio", "output"):
         if key in payload:
             return key
+    if set(payload).issubset({"actions", "trajectory"}):
+        return None
     if "actions" in payload:
         return None
     return next(iter(payload), None)
@@ -217,6 +221,7 @@ def _has_non_audio_postprocess_payload(postprocess_output: DiffusionPostprocessO
         or "image" in postprocess_output.outputs
         or "text" in postprocess_output.metadata
         or "actions" in postprocess_output.outputs
+        or "trajectory" in postprocess_output.outputs
         or _metadata_video_fps(postprocess_output.metadata) is not None
     )
 
@@ -229,7 +234,7 @@ def _build_multimodal_output(
     if postprocess_output.metadata:
         mm_output["metadata"] = postprocess_output.metadata
     for key, value in postprocess_output.outputs.items():
-        if key in {"audio", "actions"}:
+        if key in {"audio", "actions", "trajectory"}:
             mm_output[key] = value
     if audio_sample_rate is not None:
         mm_output["audio_sample_rate"] = audio_sample_rate
@@ -255,6 +260,11 @@ def _format_single_prompt_output(
     mm_output = _build_multimodal_output(postprocess_output, audio_sample_rate)
     if is_text_output:
         mm_output["text"] = outputs[0] if len(outputs) == 1 else outputs
+    trajectory_payload = _trajectory_payload(postprocess_output, diffusion_output)
+    trajectory_latents = trajectory_payload.get("latents")
+    trajectory_timesteps = trajectory_payload.get("timesteps")
+    trajectory_log_probs = trajectory_payload.get("log_probs")
+    trajectory_decoded = trajectory_payload.get("decoded")
 
     if is_text_output:
         return [
@@ -281,11 +291,11 @@ def _format_single_prompt_output(
                 images=[],
                 prompt=prompt,
                 metrics=metrics,
-                latents=diffusion_output.trajectory_latents,
-                trajectory_latents=diffusion_output.trajectory_latents,
-                trajectory_timesteps=diffusion_output.trajectory_timesteps,
-                trajectory_log_probs=diffusion_output.trajectory_log_probs,
-                trajectory_decoded=diffusion_output.trajectory_decoded,
+                latents=trajectory_latents,
+                trajectory_latents=trajectory_latents,
+                trajectory_timesteps=trajectory_timesteps,
+                trajectory_log_probs=trajectory_log_probs,
+                trajectory_decoded=trajectory_decoded,
                 multimodal_output=_format_audio_multimodal_output(
                     request_audio_payload,
                     audio_sample_rate,
@@ -304,14 +314,43 @@ def _format_single_prompt_output(
             images=outputs,
             prompt=prompt,
             metrics=metrics,
-            latents=diffusion_output.trajectory_latents,
-            trajectory_latents=diffusion_output.trajectory_latents,
-            trajectory_timesteps=diffusion_output.trajectory_timesteps,
-            trajectory_log_probs=diffusion_output.trajectory_log_probs,
-            trajectory_decoded=diffusion_output.trajectory_decoded,
+            latents=trajectory_latents,
+            trajectory_latents=trajectory_latents,
+            trajectory_timesteps=trajectory_timesteps,
+            trajectory_log_probs=trajectory_log_probs,
+            trajectory_decoded=trajectory_decoded,
             multimodal_output=mm_output,
             stage_durations=diffusion_output.stage_durations,
             peak_memory_mb=diffusion_output.peak_memory_mb,
             finished=finished,
         ),
     ]
+
+
+def _trajectory_payload(
+    postprocess_output: DiffusionPostprocessOutput,
+    diffusion_output: DiffusionOutput,
+) -> DiffusionTrajectoryPayload:
+    trajectory: DiffusionTrajectoryPayload = {}
+    payload = postprocess_output.outputs.get("trajectory")
+    if isinstance(payload, Mapping):
+        for source_key, target_key in (
+            ("latents", "latents"),
+            ("timesteps", "timesteps"),
+            ("log_probs", "log_probs"),
+            ("decoded", "decoded"),
+        ):
+            value = payload.get(source_key)
+            if value is not None:
+                trajectory[target_key] = value
+
+    fallback_fields = (
+        ("latents", diffusion_output.trajectory_latents),
+        ("timesteps", diffusion_output.trajectory_timesteps),
+        ("log_probs", diffusion_output.trajectory_log_probs),
+        ("decoded", diffusion_output.trajectory_decoded),
+    )
+    for key, value in fallback_fields:
+        if key not in trajectory and value is not None:
+            trajectory[key] = value
+    return trajectory

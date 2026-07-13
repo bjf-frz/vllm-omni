@@ -169,6 +169,51 @@ def test_formatter_normalizes_payload_metadata_envelope(
     }
 
 
+def test_formatter_maps_trajectory_payload_to_request_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(output_formatter, "supports_audio_output", lambda _: False)
+    latents = torch.zeros(2, 1, 4)
+    timesteps = torch.tensor([1.0, 0.5])
+    log_probs = torch.tensor([-0.1, -0.2])
+    postprocess_output = normalize_diffusion_postprocess_output(
+        {
+            "payload": {
+                "image": "image-0",
+                "trajectory": {
+                    "latents": latents,
+                    "timesteps": timesteps,
+                    "log_probs": log_probs,
+                },
+            },
+            "metadata": {"trajectory": {"type": "denoising"}},
+        }
+    )
+
+    [result] = format_diffusion_outputs(
+        request=_request("prompt-0"),
+        od_config=_config(),
+        diffusion_output=DiffusionOutput(output=None),
+        output_data={"raw": "output"},
+        postprocess_output=postprocess_output,
+        timings=_timings(),
+    )
+
+    assert result.images == ["image-0"]
+    assert result.latents is latents
+    assert result.trajectory_latents is latents
+    assert result.trajectory_timesteps is timesteps
+    assert result.trajectory_log_probs is log_probs
+    assert result.multimodal_output == {
+        "metadata": {"trajectory": {"type": "denoising"}},
+        "trajectory": {
+            "latents": latents,
+            "timesteps": timesteps,
+            "log_probs": log_probs,
+        },
+    }
+
+
 def test_formatter_preserves_text_envelope_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(output_formatter, "supports_audio_output", lambda _: False)
     postprocess_output = normalize_diffusion_postprocess_output(

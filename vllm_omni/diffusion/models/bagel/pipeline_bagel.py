@@ -849,19 +849,28 @@ class BagelPipeline(nn.Module, SupportsComponentDiscovery, DiffusionPipelineProf
         if trajectory_log_probs:
             trajectory_log_probs_stacked = torch.stack(trajectory_log_probs)
 
+        payload = {"image": img}
         metadata = {}
         if think_text is not None:
             metadata["text"] = {"think_text": think_text}
+        trajectory_payload = {}
+        if trajectory_latents_stacked is not None:
+            trajectory_payload["latents"] = trajectory_latents_stacked
+        if trajectory_timesteps_stacked is not None:
+            trajectory_payload["timesteps"] = trajectory_timesteps_stacked
+        if trajectory_log_probs_stacked is not None:
+            trajectory_payload["log_probs"] = trajectory_log_probs_stacked
+        if trajectory_decoded is not None:
+            trajectory_payload["decoded"] = trajectory_decoded
+        if trajectory_payload:
+            payload["trajectory"] = trajectory_payload
+            metadata["trajectory"] = {"type": "denoising"}
 
         return DiffusionOutput(
             output={
-                "payload": {"image": img},
+                "payload": payload,
                 "metadata": metadata,
             },
-            trajectory_latents=trajectory_latents_stacked,
-            trajectory_timesteps=trajectory_timesteps_stacked,
-            trajectory_log_probs=trajectory_log_probs_stacked,
-            trajectory_decoded=trajectory_decoded,
             stage_durations=self.stage_durations if hasattr(self, "stage_durations") else None,
         )
 

@@ -1198,8 +1198,10 @@ class DiffusionOutput:
     Final output (after pipeline completion)
     """
 
-    # Fields may be replaced with SHM handle dicts by ipc.pack_diffusion_output_shm
     output: torch.Tensor | tuple[Any, ...] | dict[str, Any] | None = None
+
+    # Legacy compatibility fields. New pipeline-specific payloads should be
+    # carried by output["payload"] instead.
     trajectory_timesteps: torch.Tensor | dict[str, Any] | None = None
     trajectory_latents: torch.Tensor | dict[str, Any] | None = None
     trajectory_log_probs: torch.Tensor | dict[str, Any] | None = None
