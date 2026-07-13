@@ -773,7 +773,6 @@ class RandomDataset(BaseDataset):
         self.num_prompts = args.num_prompts
         self.enable_negative_prompt = enable_negative_prompt
         self.num_input_images = max(1, args.num_input_images)
-        self.extra_body = json.loads(args.extra_body) if args.extra_body else {}
         self.random_request_config = getattr(args, "random_request_config", None)
         if self.random_request_config:
             self.random_request_config = json.loads(self.random_request_config)
@@ -808,7 +807,7 @@ class RandomDataset(BaseDataset):
         return self.num_prompts
 
     def __getitem__(self, idx: int) -> RequestFuncInput:
-        extra_body = dict(self.extra_body)
+        extra_body = {}
         if self.enable_negative_prompt:
             extra_body["negative_prompt"] = f"Negative prompt {idx} for benchmarking diffusion models"
 
