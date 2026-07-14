@@ -5,7 +5,7 @@
         "server_type": "vllm-omni",
         "benchmark_endpoint": "/v1/images/generations",
         "server_params": {
-            "model": "/mnt/data1/huggingface/hub/models--nvidia--Cosmos3-Nano/snapshots/23314034b82f46b45339035dba67c3ee9bbcb8ba",
+            "model": "nvidia/Cosmos3-Nano",
             "serve_args": {
                 "cfg-parallel-size": 2,
                 "use-hsdp": true,
@@ -45,7 +45,7 @@
         "server_type": "vllm-omni",
         "benchmark_endpoint": "/v1/videos",
         "server_params": {
-            "model": "/mnt/data1/huggingface/hub/models--nvidia--Cosmos3-Nano/snapshots/23314034b82f46b45339035dba67c3ee9bbcb8ba",
+            "model": "nvidia/Cosmos3-Nano",
             "serve_args": {
                 "cfg-parallel-size": 2,
                 "use-hsdp": true,
@@ -96,7 +96,7 @@
         "server_type": "vllm-omni",
         "benchmark_endpoint": "/v1/videos",
         "server_params": {
-            "model": "/mnt/data1/huggingface/hub/models--nvidia--Cosmos3-Nano/snapshots/23314034b82f46b45339035dba67c3ee9bbcb8ba",
+            "model": "nvidia/Cosmos3-Nano",
             "serve_args": {
                 "cfg-parallel-size": 2,
                 "use-hsdp": true,
@@ -146,7 +146,7 @@
         "server_type": "vllm-omni",
         "benchmark_endpoint": "/v1/videos",
         "server_params": {
-            "model": "/mnt/data1/huggingface/hub/models--nvidia--Cosmos3-Nano/snapshots/23314034b82f46b45339035dba67c3ee9bbcb8ba",
+            "model": "nvidia/Cosmos3-Nano",
             "serve_args": {
                 "cfg-parallel-size": 2,
                 "use-hsdp": true,
