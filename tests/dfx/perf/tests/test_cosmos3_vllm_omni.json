@@ -35,7 +35,11 @@
                     "flow_shift": 3.0,
                     "guardrails": false
                 },
-                "skip-performance-assertion": true
+                "baseline": {
+                    "throughput_qps": 1.107,
+                    "latency_mean": 0.8929,
+                    "peak_memory_mb_mean": 999999.0
+                }
             }
         ]
     },
@@ -86,7 +90,11 @@
                     "use_resolution_template": false,
                     "use_duration_template": false
                 },
-                "skip-performance-assertion": true
+                "baseline": {
+                    "throughput_qps": 0.027,
+                    "latency_mean": 36.6824,
+                    "peak_memory_mb_mean": 30155.4
+                }
             }
         ]
     },
@@ -136,7 +144,11 @@
                     "max_sequence_length": 4096,
                     "guardrails": false
                 },
-                "skip-performance-assertion": true
+                "baseline": {
+                    "throughput_qps": 0.027,
+                    "latency_mean": 36.968,
+                    "peak_memory_mb_mean": 30443.6
+                }
             }
         ]
     },
@@ -190,7 +202,11 @@
                     ],
                     "condition_video_keep": "first"
                 },
-                "skip-performance-assertion": true
+                "baseline": {
+                    "throughput_qps": 0.027,
+                    "latency_mean": 37.2117,
+                    "peak_memory_mb_mean": 30135.6
+                }
             }
         ]
     }
