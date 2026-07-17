@@ -11,7 +11,7 @@ import torch
 from pytest_mock import MockerFixture
 
 from vllm_omni.diffusion.data import DiffusionOutput, DiffusionRequestAbortedError
-from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
+from vllm_omni.diffusion.diffusion_engine import DiffusionEngine, DiffusionExecutionMode
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.sched import (
     DiffusionRequestStatus,
@@ -530,13 +530,11 @@ class TestDiffusionEngine:
         assert output is runner_output.result
         engine.execute_fn.assert_called_once()
 
-    def test_initializes_injected_scheduler(
+    def test_initializes_default_request_scheduler(
         self,
         monkeypatch: pytest.MonkeyPatch,
         mocker: MockerFixture,
     ) -> None:
-        request = _make_request("init")
-        scheduler = _StubScheduler(request, DiffusionOutput(output=None))
         od_config = SimpleNamespace(model_class_name="mock_model", streaming_output=False)
         fake_executor_cls = mocker.Mock(return_value=mocker.Mock())
 
@@ -552,11 +550,11 @@ class TestDiffusionEngine:
             "vllm_omni.diffusion.diffusion_engine.DiffusionExecutor.get_class",
             lambda *args, **kwargs: fake_executor_cls,
         )
-        monkeypatch.setattr(DiffusionEngine, "_dummy_run", lambda self: None)
 
-        DiffusionEngine(od_config, scheduler=scheduler)
+        engine = DiffusionEngine(od_config)
 
-        assert scheduler.initialized_with is od_config
+        assert isinstance(engine.scheduler, RequestScheduler)
+        assert engine.scheduler.max_num_running_reqs == 1
         fake_executor_cls.assert_called_once_with(od_config)
 
     def test_scheduler_alias_keeps_default_request_scheduler(self) -> None:
@@ -575,7 +573,8 @@ class TestDiffusionEngine:
         engine = DiffusionEngine.__new__(DiffusionEngine)
         engine._check_and_start_background_loop = mocker.AsyncMock()
         engine.pre_process_func = None
-        engine.async_add_req_and_wait_for_response = mocker.AsyncMock(
+        engine.async_add_req_and_stream_response = mocker.Mock(return_value=mocker.Mock())
+        engine._consume_final_output = mocker.AsyncMock(
             return_value=DiffusionOutput(aborted=True, abort_message="Request req-abort aborted.")
         )
 
@@ -617,12 +616,13 @@ class TestDiffusionEngine:
         engine.scheduler.initialize(SimpleNamespace())
         engine._rpc_lock = threading.RLock()
         engine._cv = threading.Condition(engine._rpc_lock)
-        engine._out_queue_streaming = {}
+        engine._out_streams = {}
+        engine.execution_mode = DiffusionExecutionMode.STEP
         engine.main_loop = asyncio.get_running_loop()
 
         req_id = engine.scheduler.add_request(_make_request("stream-engine"))
         queue: asyncio.Queue[DiffusionOutput] = asyncio.Queue()
-        engine._out_queue_streaming[req_id] = queue
+        engine._out_streams[req_id] = queue
         sched_output = engine.scheduler.schedule()
 
         chunk = RunnerOutput(
@@ -632,7 +632,7 @@ class TestDiffusionEngine:
             result=DiffusionOutput(output="chunk-0", finished=False, chunk_index=0, total_chunks=2),
         )
         finished_req_ids = engine.scheduler.update_from_output(sched_output, chunk)
-        engine._handle_step_streaming_runner_output(finished_req_ids, sched_output.scheduled_request_ids, chunk)
+        engine._emit_outputs(finished_req_ids, sched_output.scheduled_request_ids, chunk)
 
         notified_chunk = await asyncio.wait_for(queue.get(), timeout=1)
         assert notified_chunk.output == "chunk-0"
@@ -646,7 +646,7 @@ class TestDiffusionEngine:
             result=DiffusionOutput(output="chunk-1", finished=True, chunk_index=1, total_chunks=2),
         )
         finished_req_ids = engine.scheduler.update_from_output(sched_output, final_chunk)
-        engine._handle_step_streaming_runner_output(finished_req_ids, sched_output.scheduled_request_ids, final_chunk)
+        engine._emit_outputs(finished_req_ids, sched_output.scheduled_request_ids, final_chunk)
 
         notified_final = await asyncio.wait_for(queue.get(), timeout=1)
         assert notified_final.output == "chunk-1"
@@ -660,15 +660,15 @@ class TestDiffusionEngine:
         engine.scheduler.initialize(SimpleNamespace())
         engine._rpc_lock = threading.RLock()
         engine._cv = threading.Condition(engine._rpc_lock)
-        engine._out_queue_streaming = {}
+        engine._out_streams = {}
         engine.main_loop = asyncio.get_running_loop()
 
         req_id = engine.scheduler.add_request(_make_request("stream-abort"))
         queue: asyncio.Queue[DiffusionOutput] = asyncio.Queue()
-        engine._out_queue_streaming[req_id] = queue
+        engine._out_streams[req_id] = queue
         engine.scheduler.finish_requests(req_id, DiffusionRequestStatus.FINISHED_ABORTED)
 
-        engine._handle_empty_streaming_requests({req_id})
+        engine._emit_finished_outputs({req_id})
 
         output = await asyncio.wait_for(queue.get(), timeout=1)
         assert output.aborted is True
@@ -697,9 +697,9 @@ class TestDiffusionEngine:
             "vllm_omni.diffusion.diffusion_engine.DiffusionExecutor.get_class",
             lambda *args, **kwargs: fake_executor_cls,
         )
-        monkeypatch.setattr(DiffusionEngine, "_dummy_run", lambda self: None)
         engine = DiffusionEngine(od_config)
 
+        assert engine.execution_mode == DiffusionExecutionMode.STEP
         assert isinstance(engine.scheduler, StepScheduler)
         assert engine.execute_fn is fake_executor.execute_step
         fake_executor_cls.assert_called_once_with(od_config)

@@ -33,8 +33,7 @@ def _make_engine() -> DiffusionEngine:
     engine.executor = SimpleNamespace(shutdown=Mock())
     engine._rpc_lock = threading.RLock()
     engine._cv = threading.Condition(engine._rpc_lock)
-    engine._out_queue = {}
-    engine._out_queue_streaming = {}
+    engine._out_streams = {}
     engine._closed = False
     engine._shutdown_complete = False
     engine.abort_queue = queue.Queue()
@@ -44,28 +43,13 @@ def _make_engine() -> DiffusionEngine:
     return engine
 
 
-def test_close_completes_pending_async_waiters() -> None:
-    engine = _make_engine()
-    event_loop = asyncio.new_event_loop()
-    try:
-        future = event_loop.create_future()
-        engine._out_queue["pending-req"] = future
-
-        engine.close()
-
-        assert future.done()
-        assert future.result().error == "DiffusionEngine is closed."
-    finally:
-        event_loop.close()
-
-
-def test_close_completes_pending_streaming_waiters() -> None:
+def test_close_completes_pending_output_streams() -> None:
     engine = _make_engine()
     event_loop = asyncio.new_event_loop()
     try:
         engine.main_loop = event_loop
         queue: asyncio.Queue[DiffusionOutput] = asyncio.Queue()
-        engine._out_queue_streaming["pending-stream"] = queue
+        engine._out_streams["pending-stream"] = queue
 
         engine.close()
 
@@ -76,19 +60,16 @@ def test_close_completes_pending_streaming_waiters() -> None:
         event_loop.close()
 
 
-def test_handle_finished_requests_ignores_already_drained_waiter() -> None:
+def test_emit_finished_outputs_ignores_already_drained_waiter() -> None:
     class RacingOutQueue(dict):
-        def __contains__(self, key):
-            return True
-
-        def pop(self, key, default=None):
+        def get(self, key, default=None):
             return default
 
     engine = _make_engine()
-    engine._out_queue = RacingOutQueue()
+    engine._out_streams = RacingOutQueue()
     engine._finalize_finished_request = Mock(side_effect=AssertionError("should not finalize drained waiters"))
 
-    engine._handle_finished_requests({"pending-req"})
+    engine._emit_finished_outputs({"pending-req"})
 
     engine._finalize_finished_request.assert_not_called()
 

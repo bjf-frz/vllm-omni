@@ -15,7 +15,11 @@ from pytest_mock import MockerFixture
 
 import vllm_omni.diffusion.diffusion_engine as diffusion_engine_module
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
-from vllm_omni.diffusion.diffusion_engine import DiffusionEngine, _move_tensor_tree_to_cpu
+from vllm_omni.diffusion.diffusion_engine import (
+    DiffusionEngine,
+    DiffusionExecutionMode,
+    _move_tensor_tree_to_cpu,
+)
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.sched.interface import (
     CachedRequestData,
@@ -255,11 +259,11 @@ class TestRequestBatchCapability:
             "_try_load_model_cls",
             lambda model_class_name: _SingleRequestPipeline,
         )
-        monkeypatch.setattr(DiffusionEngine, "_dummy_run", lambda self: None)
 
         engine = DiffusionEngine(od_config)
         output = engine.execute_fn(_make_request_mode_sched_output("req-a", "req-b"))
 
+        assert engine.execution_mode == DiffusionExecutionMode.REQUEST
         assert engine.supports_request_batch is False
         assert output == "per-request"
         fake_executor.execute_request.assert_called_once()
@@ -301,15 +305,54 @@ class TestRequestBatchCapability:
             "_try_load_model_cls",
             lambda model_class_name: _BatchCapablePipeline,
         )
-        monkeypatch.setattr(DiffusionEngine, "_dummy_run", lambda self: None)
 
         engine = DiffusionEngine(od_config)
         output = engine.execute_fn(_make_request_mode_sched_output(*request_ids))
 
+        assert engine.execution_mode == DiffusionExecutionMode.REQUEST_BATCH
         assert engine.supports_request_batch is True
         assert output == "batch"
         fake_executor.execute_batch.assert_called_once()
         fake_executor.execute_request.assert_not_called()
+
+    def test_make_engine_runs_startup_warmup(self, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture) -> None:
+        od_config = SimpleNamespace(
+            model_class_name="SinglePipeline",
+            custom_pipeline_args=None,
+            engine_backend="default",
+            streaming_output=False,
+        )
+        fake_executor = SimpleNamespace(
+            execute_request=mocker.Mock(),
+            execute_batch=mocker.Mock(),
+            execute_step=mocker.Mock(),
+        )
+        fake_executor_cls = mocker.Mock(return_value=fake_executor)
+        warmup = mocker.Mock()
+
+        monkeypatch.setattr(
+            "vllm_omni.diffusion.diffusion_engine.get_diffusion_post_process_func",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "vllm_omni.diffusion.diffusion_engine.get_diffusion_pre_process_func",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "vllm_omni.diffusion.diffusion_engine.DiffusionExecutor.get_class",
+            lambda *args, **kwargs: fake_executor_cls,
+        )
+        monkeypatch.setattr(
+            diffusion_engine_module.DiffusionModelRegistry,
+            "_try_load_model_cls",
+            lambda model_class_name: _SingleRequestPipeline,
+        )
+        monkeypatch.setattr(DiffusionEngine, "run_startup_warmup", warmup)
+
+        engine = DiffusionEngine.make_engine(od_config)
+
+        assert isinstance(engine, DiffusionEngine)
+        warmup.assert_called_once_with()
 
 
 class TestRequestBatchAdmission:
@@ -474,7 +517,7 @@ def test_move_tensor_tree_moves_nested_cuda_tensors_to_cpu() -> None:
 async def test_async_add_req_and_wait_for_response():
     engine = object.__new__(DiffusionEngine)
     engine.scheduler = MockScheduler()
-    engine._out_queue = {}
+    engine._out_streams = {}
     engine.abort_queue: queue.Queue[str] = queue.Queue()
     engine._rpc_queue = queue.Queue()
     engine._rpc_lock = threading.RLock()
@@ -485,6 +528,7 @@ async def test_async_add_req_and_wait_for_response():
     engine._loop_started = False
     engine.main_loop = None
     engine.supports_request_batch = False
+    engine.execution_mode = DiffusionExecutionMode.REQUEST
 
     engine._finalize_finished_request = lambda rid, out, err: out.result
 

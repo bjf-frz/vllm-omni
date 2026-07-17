@@ -30,7 +30,7 @@ from typing import Any
 import pytest
 
 from vllm_omni.diffusion.data import DiffusionOutput
-from vllm_omni.diffusion.diffusion_engine import DiffusionEngine, _RpcTask
+from vllm_omni.diffusion.diffusion_engine import DiffusionEngine, DiffusionExecutionMode, _RpcTask
 from vllm_omni.diffusion.sched import RequestScheduler
 from vllm_omni.diffusion.sched.interface import RequestBatchSamplingParamsKey
 from vllm_omni.diffusion.worker.utils import RunnerOutput
@@ -149,12 +149,12 @@ def _make_engine_with_loop(
     engine.scheduler = sched
     engine.step_execution = False
     engine.supports_request_batch = False
+    engine.execution_mode = DiffusionExecutionMode.REQUEST
     engine.execute_fn = engine.executor.execute_request
 
     engine._rpc_lock = threading.RLock()
     engine._cv = threading.Condition(engine._rpc_lock)
-    engine._out_queue = {}
-    engine._out_queue_streaming = {}
+    engine._out_streams = {}
     engine._closed = False
     engine.abort_queue = queue.Queue()
     engine._rpc_queue = queue.Queue()
