@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from vllm_omni.outputs import OmniRequestOutput
 
 from vllm_omni.inputs.data import OmniSamplingParams
-from vllm_omni.outputs.output_metadata import FinalOutputModalityType
+from vllm_omni.outputs.output_types import FinalOutputModalityType
 
 
 class StageClient(Protocol):

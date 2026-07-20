@@ -125,7 +125,7 @@ from vllm_omni.entrypoints.openai.utils import (
 from vllm_omni.errors import OmniClientError
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
-from vllm_omni.outputs.output_metadata import DiffusionMetadataMapping, DiffusionMetadataValue
+from vllm_omni.outputs.output_types import DiffusionMetadataMapping, DiffusionMetadataValue
 from vllm_omni.utils.audio import audio_chunk_pcm_bytes, audio_chunk_sample_rate
 
 logger = init_logger(__name__)
