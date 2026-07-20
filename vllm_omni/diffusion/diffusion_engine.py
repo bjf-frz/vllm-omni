@@ -258,24 +258,6 @@ class DiffusionEngine:
             self.worker_thread.start()
             self._loop_started = True
 
-    async def step(self, request: OmniDiffusionRequest) -> list[OmniRequestOutput]:
-        await self._check_and_start_background_loop()
-
-        diffusion_engine_start_time = time.perf_counter()
-
-        # Apply pre-processing if available
-        preprocess_time = 0.0
-        if self.pre_process_func is not None:
-            preprocess_start_time = time.perf_counter()
-            request = self.pre_process_func(request)
-            preprocess_time = time.perf_counter() - preprocess_start_time
-            logger.debug("Pre-processing completed in %.4f seconds", preprocess_time)
-
-        exec_start_time = time.perf_counter()
-        output = await self._consume_final_output(self.async_add_req_and_stream_response(request))
-        exec_total_time = time.perf_counter() - exec_start_time
-        return self.postprocess_output(request, output, diffusion_engine_start_time, preprocess_time, exec_total_time)
-
     async def step_streaming(self, request: OmniDiffusionRequest) -> AsyncGenerator[list[OmniRequestOutput], None]:
         await self._check_and_start_background_loop()
 
@@ -345,7 +327,7 @@ class DiffusionEngine:
 
         step_total_ms = (time.perf_counter() - diffusion_engine_start_time) * 1000
         logger.debug(
-            "DiffusionEngine.step breakdown: preprocess=%.2f ms, "
+            "DiffusionEngine.step_streaming breakdown: preprocess=%.2f ms, "
             "add_req_and_wait=%.2f ms, postprocess=%.2f ms, total=%.2f ms",
             preprocess_time * 1000,
             exec_total_time * 1000,
@@ -676,17 +658,6 @@ class DiffusionEngine:
     def async_add_req_and_stream_response(self, request: OmniDiffusionRequest) -> AsyncGenerator[DiffusionOutput, None]:
         request_id = self.add_request(request)
         return self.get_output_stream(request_id)
-
-    async def async_add_req_and_wait_for_response(self, request: OmniDiffusionRequest) -> DiffusionOutput:
-        return await self._consume_final_output(self.async_add_req_and_stream_response(request))
-
-    async def _consume_final_output(self, generator: AsyncGenerator[DiffusionOutput, None]) -> DiffusionOutput:
-        final_output: DiffusionOutput | None = None
-        async for output in generator:
-            final_output = output
-        if final_output is None:
-            raise RuntimeError("Diffusion execution finished without output.")
-        return final_output
 
     def add_req_and_wait_for_response(self, request: OmniDiffusionRequest) -> DiffusionOutput:
         with self._rpc_lock:

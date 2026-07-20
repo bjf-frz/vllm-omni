@@ -513,8 +513,17 @@ def test_move_tensor_tree_moves_nested_cuda_tensors_to_cpu() -> None:
     assert moved["items"][1][0] == "keep"
 
 
+async def _consume_final_output(generator):
+    final_output = None
+    async for output in generator:
+        final_output = output
+    if final_output is None:
+        raise RuntimeError("Diffusion execution finished without output.")
+    return final_output
+
+
 @pytest.mark.asyncio
-async def test_async_add_req_and_wait_for_response():
+async def test_async_add_req_and_stream_response():
     engine = object.__new__(DiffusionEngine)
     engine.scheduler = MockScheduler()
     engine._out_streams = {}
@@ -556,7 +565,7 @@ async def test_async_add_req_and_wait_for_response():
     async def run_task(rid):
         req = SimpleNamespace(request_id=rid)
         start = time.time()
-        res = await engine.async_add_req_and_wait_for_response(req)
+        res = await _consume_final_output(engine.async_add_req_and_stream_response(req))
         return rid, res, time.time() - start
 
     task_ids = [f"req_{i}" for i in range(5)]

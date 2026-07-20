@@ -569,17 +569,19 @@ class TestDiffusionEngine:
         assert scheduler.get_request_state(req_id).status == DiffusionRequestStatus.FINISHED_COMPLETED
 
     @pytest.mark.asyncio
-    async def test_step_raises_aborted_error(self, mocker: MockerFixture) -> None:
+    async def test_step_streaming_raises_aborted_error(self, mocker: MockerFixture) -> None:
         engine = DiffusionEngine.__new__(DiffusionEngine)
         engine._check_and_start_background_loop = mocker.AsyncMock()
         engine.pre_process_func = None
-        engine.async_add_req_and_stream_response = mocker.Mock(return_value=mocker.Mock())
-        engine._consume_final_output = mocker.AsyncMock(
-            return_value=DiffusionOutput(aborted=True, abort_message="Request req-abort aborted.")
-        )
+
+        async def _stream(_request):
+            yield DiffusionOutput(aborted=True, abort_message="Request req-abort aborted.")
+
+        engine.async_add_req_and_stream_response = mocker.Mock(return_value=_stream(None))
 
         with pytest.raises(DiffusionRequestAbortedError, match="Request req-abort aborted"):
-            await engine.step(_make_request("req-abort"))
+            async for _ in engine.step_streaming(_make_request("req-abort")):
+                pass
 
     def test_abort_queue_marks_request_finished_aborted(self) -> None:
         engine = DiffusionEngine.__new__(DiffusionEngine)
