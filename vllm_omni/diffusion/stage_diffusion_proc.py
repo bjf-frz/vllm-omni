@@ -165,6 +165,8 @@ class StageDiffusionProc:
             kv_sender_info=kv_sender_info,
         )
 
+        # Non-streaming callers share the streaming engine path but only
+        # return the final output.
         result = None
         async for results in self._engine.step_streaming(request):
             result = results[0]

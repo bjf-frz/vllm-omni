@@ -152,18 +152,22 @@ class DiffusionEngine:
     def __init__(
         self,
         od_config: OmniDiffusionConfig,
+        scheduler: SchedulerInterface | None = None,
     ):
         """Initialize the diffusion engine.
 
         Args:
-            config: The configuration for the diffusion engine.
+            od_config: The configuration for the diffusion engine.
+            scheduler: Optional scheduler override for tests or custom engine
+                integrations. When omitted, the engine selects a scheduler
+                from the resolved execution mode.
         """
         self.od_config = od_config
 
         self._init_process_hooks(od_config)
         self.execution_mode = self._resolve_execution_mode(od_config)
         self._init_executor(od_config)
-        self._init_scheduler(od_config)
+        self._init_scheduler(od_config, scheduler)
         self._init_runtime_state()
         self._init_execute_fn()
         self._log_execution_mode(od_config)
@@ -198,9 +202,12 @@ class DiffusionEngine:
     def _init_scheduler(
         self,
         od_config: OmniDiffusionConfig,
+        scheduler: SchedulerInterface | None = None,
     ) -> None:
-        if self.execution_mode == DiffusionExecutionMode.STEP:
-            self.scheduler: SchedulerInterface = StepScheduler()
+        if scheduler is not None:
+            self.scheduler = scheduler
+        elif self.execution_mode == DiffusionExecutionMode.STEP:
+            self.scheduler = StepScheduler()
         else:
             self.scheduler = RequestScheduler()
         self.scheduler.initialize(od_config)
@@ -519,8 +526,6 @@ class DiffusionEngine:
         missing_result_error: str = "Diffusion execution finished without a final output",
     ) -> None:
         for rid in finished_ids:
-            if not self._has_output_stream(rid):
-                continue
             if runner_output is not None:
                 _output = runner_output.get_request_output(rid)
             else:
@@ -544,8 +549,6 @@ class DiffusionEngine:
         # finished_ids may have some requests that are not scheduler in this round.
         # First handle this-round requests.
         for request_id in scheduled_request_ids:
-            if not self._has_output_stream(request_id):
-                continue
             req_output = runner_output.get_request_output(request_id)
             if request_id in finished_ids:
                 # This entire request is finished (this is the last chunk)
@@ -563,8 +566,6 @@ class DiffusionEngine:
 
         # Then handle other requests that are finished in this round.
         for request_id in finished_ids - delivered_finished_req_ids:
-            if not self._has_output_stream(request_id):
-                continue
             out = self._finalize_finished_request(
                 request_id,
                 missing_result_error="Diffusion step request finished without execution output.",
@@ -611,17 +612,22 @@ class DiffusionEngine:
         raise ValueError(f"Unknown engine_backend: {backend!r}")
 
     @staticmethod
-    def make_engine(config: OmniDiffusionConfig) -> DiffusionEngine:
+    def make_engine(
+        config: OmniDiffusionConfig,
+        scheduler: SchedulerInterface | None = None,
+    ) -> DiffusionEngine:
         """Factory method to create the engine selected by ``config.engine_backend``.
 
         Args:
             config: The configuration for the diffusion engine.
+            scheduler: Optional scheduler override. When omitted, the selected
+                engine chooses the scheduler from its execution mode.
 
         Returns:
             An instance of the resolved ``DiffusionEngine`` (sub)class.
         """
         engine_class = DiffusionEngine.resolve_engine_class(config)
-        engine = engine_class(config)
+        engine = engine_class(config, scheduler=scheduler)
         engine.run_startup_warmup()
         return engine
 

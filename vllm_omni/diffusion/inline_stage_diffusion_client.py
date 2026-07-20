@@ -139,6 +139,8 @@ class InlineStageDiffusionClient(StageClientBase):
                         result.request_id = request_id
                     self._output_queue.put_nowait(result)
             else:
+                # Non-streaming callers share the streaming engine path but
+                # only publish the final output.
                 result = None
                 async for results in self._engine.step_streaming(request):
                     result = results[0]

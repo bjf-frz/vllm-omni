@@ -10,7 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from vllm_omni.diffusion.data import DiffusionOutput
-from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
+from vllm_omni.diffusion.diffusion_engine import DiffusionEngine, DiffusionExecutionMode
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.sched import DiffusionRequestStatus, RequestScheduler
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
@@ -60,18 +60,65 @@ def test_close_completes_pending_output_streams() -> None:
         event_loop.close()
 
 
-def test_emit_finished_outputs_ignores_already_drained_waiter() -> None:
+def test_emit_finished_outputs_finalizes_already_drained_waiter() -> None:
     class RacingOutQueue(dict):
         def get(self, key, default=None):
             return default
 
     engine = _make_engine()
+    request_id = engine.scheduler.add_request(_make_request("pending-req"))
+    engine.scheduler.finish_requests(request_id, DiffusionRequestStatus.FINISHED_ABORTED)
     engine._out_streams = RacingOutQueue()
-    engine._finalize_finished_request = Mock(side_effect=AssertionError("should not finalize drained waiters"))
 
-    engine._emit_finished_outputs({"pending-req"})
+    engine._emit_finished_outputs({request_id})
 
-    engine._finalize_finished_request.assert_not_called()
+    assert engine.scheduler.get_request_state(request_id) is None
+
+
+def test_emit_step_outputs_finalizes_finished_request_without_stream() -> None:
+    engine = _make_engine()
+    engine.execution_mode = DiffusionExecutionMode.STEP
+    request_id = engine.scheduler.add_request(_make_request("step-drained"))
+    engine.scheduler.finish_requests(request_id, DiffusionRequestStatus.FINISHED_ABORTED)
+
+    engine._emit_outputs({request_id}, [request_id], SimpleNamespace(get_request_output=lambda _request_id: None))
+
+    assert engine.scheduler.get_request_state(request_id) is None
+
+
+def test_init_accepts_custom_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
+    od_config = SimpleNamespace(
+        custom_pipeline_args=None,
+        model_class_name="CustomSchedulerPipeline",
+        streaming_output=False,
+    )
+    custom_scheduler = RequestScheduler()
+    fake_executor = SimpleNamespace(
+        execute_request=Mock(),
+        execute_batch=Mock(),
+        execute_step=Mock(),
+    )
+
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.diffusion_engine.get_diffusion_post_process_func",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.diffusion_engine.get_diffusion_pre_process_func",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.diffusion_engine.DiffusionExecutor.get_class",
+        lambda *args, **kwargs: Mock(return_value=fake_executor),
+    )
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.diffusion_engine.supports_request_batch",
+        lambda *args, **kwargs: False,
+    )
+
+    engine = DiffusionEngine(od_config, scheduler=custom_scheduler)
+
+    assert engine.scheduler is custom_scheduler
 
 
 def test_abort_request_id_aborts_scheduler_request() -> None:
