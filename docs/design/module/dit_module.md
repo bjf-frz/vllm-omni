@@ -78,14 +78,13 @@ class DiffusionEngine:
 
 - **Pre/Post Processing**: Registers model-specific pre-processing and post-processing functions via registry pattern
 
-- **Execution Mode Selection**: Selects one of three execution modes:
-  - `REQUEST`: one request is executed through the single-request forward path.
-  - `REQUEST_BATCH`: compatible requests are batched and executed through `pipeline.forward(batch)`.
-  - `STEP`: requests are advanced one denoising step at a time through `prepare_encode()`, `denoise_step()`, `step_scheduler()`, and `post_decode()`.
+- **Execution Mode Selection**: Selects one of two execution modes:
+  - `REQUEST_BATCH`: complete requests are scheduled through request-level execution. `max_num_seqs=1` is the serial request path; values above `1` allow compatible requests to use fused `pipeline.forward(batch)` when the pipeline supports it.
+  - `STEP_BATCH`: requests are advanced one denoising step at a time through `prepare_encode()`, `denoise_step()`, `step_scheduler()`, and `post_decode()`. `max_num_seqs` controls the maximum number of compatible active requests in one step wave.
 
-- **Scheduler Selection**: Uses `StepScheduler` for step execution and `RequestScheduler` for request/request-batch execution. Tests and custom integrations may inject a `SchedulerInterface` instance explicitly.
+- **Scheduler Selection**: Uses `StepScheduler` for step-batch execution and `RequestScheduler` for request-batch execution. Tests and custom integrations may inject a `SchedulerInterface` instance explicitly.
 
-- **Executor Selection**: Builds the configured `DiffusionExecutor`, then routes scheduled work through `execute_request`, `execute_batch`, or `execute_step` according to the execution mode.
+- **Executor Selection**: Builds the configured `DiffusionExecutor`, then routes scheduled work through `execute_batch` or `execute_step` according to the execution mode. `execute_batch` handles the serial `max_num_seqs=1` request path internally.
 
 - **Factory-Owned Warmup**: `DiffusionEngine.make_engine()` constructs the selected engine backend and then runs startup warmup through `run_startup_warmup()`.
 
@@ -93,9 +92,8 @@ class DiffusionEngine:
 
 ```python
 class DiffusionExecutionMode(str, Enum):
-    REQUEST = "request"
     REQUEST_BATCH = "request_batch"
-    STEP = "step"
+    STEP_BATCH = "step_batch"
 ```
 
 `streaming_output=True` requires step execution. If streaming is enabled without `step_execution=True`, the engine enables step execution so the output stream can receive intermediate chunks or the final step output.
@@ -936,12 +934,12 @@ def initialize_model_parallel(
        └─> Model-specific transformations
 
 3. Scheduling
-   └─> scheduler.add_request(request)
-       └─> scheduler.schedule()
-           └─> DiffusionEngine selects execute_request / execute_batch / execute_step
+       └─> scheduler.add_request(request)
+           └─> scheduler.schedule()
+           └─> DiffusionEngine selects execute_batch / execute_step
 
 4. Worker Execution
-   ├─> REQUEST / REQUEST_BATCH
+   ├─> REQUEST_BATCH
    │   └─> Pipeline.forward(req_or_batch)
    │       ├─> encode_prompt()
    │       ├─> prepare_latents()

@@ -79,7 +79,7 @@ def test_emit_finished_outputs_finalizes_already_drained_waiter() -> None:
 
 def test_emit_step_outputs_finalizes_finished_request_without_stream() -> None:
     engine = _make_engine()
-    engine.execution_mode = DiffusionExecutionMode.STEP
+    engine.execution_mode = DiffusionExecutionMode.STEP_BATCH
     request_id = engine.scheduler.add_request(_make_request("step-drained"))
     engine.scheduler.finish_requests(request_id, DiffusionRequestStatus.FINISHED_ABORTED)
 

@@ -28,14 +28,6 @@ from vllm_omni.outputs.output_types import (
 
 
 @dataclass(frozen=True)
-class DiffusionStepTimings:
-    preprocess_time_s: float
-    exec_time_s: float
-    postprocess_time_s: float
-    total_time_ms: float
-
-
-@dataclass(frozen=True)
 class DiffusionPostprocessOutput:
     outputs: DiffusionPayload
     metadata: DiffusionMetadata = field(default_factory=dict)
@@ -134,19 +126,14 @@ def format_diffusion_outputs(
     diffusion_output: DiffusionOutput,
     output_data: DiffusionPostprocessRawOutput,
     postprocess_output: DiffusionPostprocessOutput,
-    timings: DiffusionStepTimings,
 ) -> list[OmniRequestOutput]:
     """Convert a finished diffusion model output into API-facing outputs."""
 
     primary_payload = _primary_payload(postprocess_output)
     outputs = _ensure_list(primary_payload)
     metrics = {
-        "preprocess_time_ms": timings.preprocess_time_s * 1000,
-        "diffusion_engine_exec_time_ms": timings.exec_time_s * 1000,
-        "diffusion_engine_total_time_ms": timings.total_time_ms,
         "image_num": int(request.sampling_params.num_outputs_per_prompt),
         "resolution": int(request.sampling_params.resolution),
-        "postprocess_time_ms": timings.postprocess_time_s * 1000,
     }
 
     # Detect text output: when the pipeline returns a string (e.g.,

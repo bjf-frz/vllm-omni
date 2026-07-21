@@ -225,7 +225,7 @@ class TestRequestBatchCapability:
             diffusion_engine_module.supports_request_batch(od_config)
         registry_load.assert_not_called()
 
-    def test_engine_disables_batch_dispatch_for_single_request_pipeline(
+    def test_engine_uses_request_batch_mode_for_single_request_pipeline(
         self,
         monkeypatch: pytest.MonkeyPatch,
         mocker: MockerFixture,
@@ -234,6 +234,7 @@ class TestRequestBatchCapability:
             model_class_name="SinglePipeline",
             custom_pipeline_args=None,
             streaming_output=False,
+            max_num_seqs=1,
         )
         fake_executor = SimpleNamespace(
             execute_request=mocker.Mock(return_value="per-request"),
@@ -261,13 +262,48 @@ class TestRequestBatchCapability:
         )
 
         engine = DiffusionEngine(od_config)
-        output = engine.execute_fn(_make_request_mode_sched_output("req-a", "req-b"))
+        output = engine.execute_fn(_make_request_mode_sched_output("req-a"))
 
-        assert engine.execution_mode == DiffusionExecutionMode.REQUEST
+        assert engine.execution_mode == DiffusionExecutionMode.REQUEST_BATCH
         assert engine.supports_request_batch is False
-        assert output == "per-request"
-        fake_executor.execute_request.assert_called_once()
-        fake_executor.execute_batch.assert_not_called()
+        assert output == "batch"
+        fake_executor.execute_batch.assert_called_once()
+        fake_executor.execute_request.assert_not_called()
+
+    def test_engine_rejects_multi_seq_request_batch_for_single_request_pipeline(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+    ) -> None:
+        od_config = SimpleNamespace(
+            model_class_name="SinglePipeline",
+            custom_pipeline_args=None,
+            streaming_output=False,
+            max_num_seqs=2,
+        )
+        fake_executor_cls = mocker.Mock()
+
+        monkeypatch.setattr(
+            "vllm_omni.diffusion.diffusion_engine.get_diffusion_post_process_func",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "vllm_omni.diffusion.diffusion_engine.get_diffusion_pre_process_func",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "vllm_omni.diffusion.diffusion_engine.DiffusionExecutor.get_class",
+            lambda *args, **kwargs: fake_executor_cls,
+        )
+        monkeypatch.setattr(
+            diffusion_engine_module.DiffusionModelRegistry,
+            "_try_load_model_cls",
+            lambda model_class_name: _SingleRequestPipeline,
+        )
+
+        with pytest.raises(ValueError, match="max_num_seqs=1"):
+            DiffusionEngine(od_config)
+        fake_executor_cls.assert_not_called()
 
     @pytest.mark.parametrize("request_ids", [("req-a",), ("req-a", "req-b")])
     def test_engine_enables_batch_dispatch_for_request_batch_pipeline(
@@ -280,6 +316,7 @@ class TestRequestBatchCapability:
             model_class_name="BatchPipeline",
             custom_pipeline_args=None,
             streaming_output=False,
+            max_num_seqs=2,
         )
         fake_executor = SimpleNamespace(
             execute_request=mocker.Mock(return_value="per-request"),
@@ -537,7 +574,7 @@ async def test_async_add_req_and_stream_response():
     engine._loop_started = False
     engine.main_loop = None
     engine.supports_request_batch = False
-    engine.execution_mode = DiffusionExecutionMode.REQUEST
+    engine.execution_mode = DiffusionExecutionMode.REQUEST_BATCH
 
     engine._finalize_finished_request = lambda rid, out, err: out.result
 

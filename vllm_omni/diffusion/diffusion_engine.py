@@ -34,7 +34,6 @@ from vllm_omni.diffusion.io_support import (
     supports_multimodal_input,
 )
 from vllm_omni.diffusion.output_formatter import (
-    DiffusionStepTimings,
     format_diffusion_outputs,
     format_empty_diffusion_outputs,
     normalize_diffusion_postprocess_output,
@@ -108,6 +107,13 @@ def supports_request_batch(od_config: OmniDiffusionConfig) -> bool:
     return bool(getattr(model_cls, "supports_request_batch", False))
 
 
+def _max_num_seqs(od_config: OmniDiffusionConfig) -> int:
+    try:
+        return max(1, int(getattr(od_config, "max_num_seqs", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _move_tensor_tree_to_cpu(value: object) -> object:
     if isinstance(value, torch.Tensor):
         return value.cpu() if value.device.type != "cpu" else value
@@ -133,9 +139,8 @@ class _RpcTask:
 
 
 class DiffusionExecutionMode(str, Enum):
-    REQUEST = "request"
     REQUEST_BATCH = "request_batch"
-    STEP = "step"
+    STEP_BATCH = "step_batch"
 
 
 class DiffusionEngine:
@@ -188,12 +193,16 @@ class DiffusionEngine:
 
         if self.step_execution:
             self.supports_request_batch = False
-            return DiffusionExecutionMode.STEP
+            return DiffusionExecutionMode.STEP_BATCH
 
         self.supports_request_batch = supports_request_batch(od_config)
-        if self.supports_request_batch:
-            return DiffusionExecutionMode.REQUEST_BATCH
-        return DiffusionExecutionMode.REQUEST
+        if not self.supports_request_batch and _max_num_seqs(od_config) > 1:
+            raise ValueError(
+                f"{getattr(od_config, 'model_class_name', None)!r} does not support request-level batching. "
+                "Use max_num_seqs=1 for serial request execution, or choose a pipeline with "
+                "supports_request_batch=True."
+            )
+        return DiffusionExecutionMode.REQUEST_BATCH
 
     def _init_executor(self, od_config: OmniDiffusionConfig) -> None:
         executor_class = DiffusionExecutor.get_class(od_config)
@@ -206,7 +215,7 @@ class DiffusionEngine:
     ) -> None:
         if scheduler is not None:
             self.scheduler = scheduler
-        elif self.execution_mode == DiffusionExecutionMode.STEP:
+        elif self.execution_mode == DiffusionExecutionMode.STEP_BATCH:
             self.scheduler = StepScheduler()
         else:
             self.scheduler = RequestScheduler()
@@ -231,12 +240,10 @@ class DiffusionEngine:
         self._rpc_queue: queue.Queue[_RpcTask] = queue.Queue()
 
     def _init_execute_fn(self) -> None:
-        if self.execution_mode == DiffusionExecutionMode.STEP:
+        if self.execution_mode == DiffusionExecutionMode.STEP_BATCH:
             self.execute_fn = self.executor.execute_step
-        elif self.execution_mode == DiffusionExecutionMode.REQUEST_BATCH:
-            self.execute_fn = self.executor.execute_batch
         else:
-            self.execute_fn = self.executor.execute_request
+            self.execute_fn = self.executor.execute_batch
 
     def _log_execution_mode(self, od_config: OmniDiffusionConfig) -> None:
         if self.execution_mode == DiffusionExecutionMode.REQUEST_BATCH:
@@ -281,9 +288,28 @@ class DiffusionEngine:
         generator = self.async_add_req_and_stream_response(request)
         async for output in generator:
             exec_total_time = time.perf_counter() - exec_start_time
-            yield self.postprocess_output(
-                request, output, diffusion_engine_start_time, preprocess_time, exec_total_time
+            postprocess_start_time = time.perf_counter()
+            formatted_outputs = self.postprocess_output(request, output)
+            postprocess_time = time.perf_counter() - postprocess_start_time
+            step_total_ms = (time.perf_counter() - diffusion_engine_start_time) * 1000
+            logger.debug(
+                "DiffusionEngine.step_streaming breakdown: preprocess=%.2f ms, "
+                "add_req_and_wait=%.2f ms, postprocess=%.2f ms, total=%.2f ms",
+                preprocess_time * 1000,
+                exec_total_time * 1000,
+                postprocess_time * 1000,
+                step_total_ms,
             )
+            for request_output in formatted_outputs:
+                request_output.metrics.update(
+                    {
+                        "preprocess_time_ms": preprocess_time * 1000,
+                        "diffusion_engine_exec_time_ms": exec_total_time * 1000,
+                        "diffusion_engine_total_time_ms": step_total_ms,
+                        "postprocess_time_ms": postprocess_time * 1000,
+                    }
+                )
+            yield formatted_outputs
 
     async def step(self, request: OmniDiffusionRequest) -> list[OmniRequestOutput]:
         """Deprecated compatibility wrapper over ``step_streaming()``.
@@ -304,11 +330,8 @@ class DiffusionEngine:
         self,
         request: OmniDiffusionRequest,
         output: DiffusionOutput,
-        diffusion_engine_start_time: float,
-        preprocess_time: float,
-        exec_total_time: float,
     ) -> list[OmniRequestOutput]:
-        """Convert a DiffusionOutput to a list of OmniRequestOutput, attaching profiling metrics."""
+        """Convert a DiffusionOutput to a list of OmniRequestOutput."""
         if output.aborted:
             raise DiffusionRequestAbortedError(output.abort_message or "Diffusion request aborted.")
         if output.error:
@@ -332,7 +355,6 @@ class DiffusionEngine:
         if self.od_config.enable_cpu_offload:
             output_data = _move_tensor_tree_to_cpu(output_data)
 
-        postprocess_start_time = time.perf_counter()
         if self.post_process_func is not None:
             # Some video pipelines need request-level controls during
             # postprocess (for example worker-side frame interpolation).
@@ -344,18 +366,6 @@ class DiffusionEngine:
             outputs = output_data
 
         postprocess_output = normalize_diffusion_postprocess_output(outputs)
-        postprocess_time = time.perf_counter() - postprocess_start_time
-        logger.debug("Post-processing completed in %.4f seconds", postprocess_time)
-
-        step_total_ms = (time.perf_counter() - diffusion_engine_start_time) * 1000
-        logger.debug(
-            "DiffusionEngine.step_streaming breakdown: preprocess=%.2f ms, "
-            "add_req_and_wait=%.2f ms, postprocess=%.2f ms, total=%.2f ms",
-            preprocess_time * 1000,
-            exec_total_time * 1000,
-            postprocess_time * 1000,
-            step_total_ms,
-        )
 
         return format_diffusion_outputs(
             request=request,
@@ -363,12 +373,6 @@ class DiffusionEngine:
             diffusion_output=output,
             output_data=output_data,
             postprocess_output=postprocess_output,
-            timings=DiffusionStepTimings(
-                preprocess_time_s=preprocess_time,
-                exec_time_s=exec_total_time,
-                postprocess_time_s=postprocess_time,
-                total_time_ms=step_total_ms,
-            ),
         )
 
     def _busy_loop(self):
@@ -392,7 +396,7 @@ class DiffusionEngine:
                     # Only RPC / abort work pending; loop back to drain it.
                     continue
 
-                if self.supports_request_batch:
+                if self.execution_mode == DiffusionExecutionMode.REQUEST_BATCH:
                     self._wait_for_request_batch_admission_locked()
 
                 sched_output = self.scheduler.schedule()
@@ -555,7 +559,7 @@ class DiffusionEngine:
         runner_output: BaseRunnerOutput,
     ) -> None:
         """Emit output chunks for every request through the unified output stream."""
-        if self.execution_mode != DiffusionExecutionMode.STEP:
+        if self.execution_mode != DiffusionExecutionMode.STEP_BATCH:
             self._emit_finished_outputs(finished_ids, runner_output)
             return
 

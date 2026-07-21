@@ -91,7 +91,7 @@ class _ConcurrencyTrackingExecutor:
                 # args[0] is the request-like object for execute_model.
                 req = args[0] if args else None
                 tag = req.request_id if req is not None and hasattr(req, "request_id") else "unknown"
-                return DiffusionOutput(error=f"result_for_{tag}")
+                return DiffusionOutput(error=f"result_for_{tag}", finished=True)
             tag = args[0] if args else method
             return DiffusionOutput(error=f"rpc_result_for_{tag}")
         finally:
@@ -149,7 +149,7 @@ def _make_engine_with_loop(
     engine.scheduler = sched
     engine.step_execution = False
     engine.supports_request_batch = False
-    engine.execution_mode = DiffusionExecutionMode.REQUEST
+    engine.execution_mode = DiffusionExecutionMode.REQUEST_BATCH
     engine.execute_fn = engine.executor.execute_request
 
     engine._rpc_lock = threading.RLock()

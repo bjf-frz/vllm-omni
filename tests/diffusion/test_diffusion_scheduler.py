@@ -619,7 +619,7 @@ class TestDiffusionEngine:
         engine._rpc_lock = threading.RLock()
         engine._cv = threading.Condition(engine._rpc_lock)
         engine._out_streams = {}
-        engine.execution_mode = DiffusionExecutionMode.STEP
+        engine.execution_mode = DiffusionExecutionMode.STEP_BATCH
         engine.main_loop = asyncio.get_running_loop()
 
         req_id = engine.scheduler.add_request(_make_request("stream-engine"))
@@ -701,7 +701,7 @@ class TestDiffusionEngine:
         )
         engine = DiffusionEngine(od_config)
 
-        assert engine.execution_mode == DiffusionExecutionMode.STEP
+        assert engine.execution_mode == DiffusionExecutionMode.STEP_BATCH
         assert isinstance(engine.scheduler, StepScheduler)
         assert engine.execute_fn is fake_executor.execute_step
         fake_executor_cls.assert_called_once_with(od_config)
