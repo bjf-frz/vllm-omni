@@ -285,6 +285,21 @@ class DiffusionEngine:
                 request, output, diffusion_engine_start_time, preprocess_time, exec_total_time
             )
 
+    async def step(self, request: OmniDiffusionRequest) -> list[OmniRequestOutput]:
+        """Deprecated compatibility wrapper over ``step_streaming()``.
+
+        Use ``step_streaming()`` for new callers. This method drains the
+        unified output stream and returns only the final output batch, matching
+        the historical non-streaming ``step()`` behavior.
+        """
+        logger.warning_once(
+            "DiffusionEngine.step() is deprecated; use step_streaming() and consume the final output batch instead."
+        )
+        final_output: list[OmniRequestOutput] | None = None
+        async for output in self.step_streaming(request):
+            final_output = output
+        return final_output or []
+
     def postprocess_output(
         self,
         request: OmniDiffusionRequest,
@@ -664,6 +679,24 @@ class DiffusionEngine:
     def async_add_req_and_stream_response(self, request: OmniDiffusionRequest) -> AsyncGenerator[DiffusionOutput, None]:
         request_id = self.add_request(request)
         return self.get_output_stream(request_id)
+
+    async def async_add_req_and_wait_for_response(self, request: OmniDiffusionRequest) -> DiffusionOutput:
+        """Deprecated compatibility wrapper over ``async_add_req_and_stream_response()``.
+
+        Use ``async_add_req_and_stream_response()`` for new callers. This
+        method drains the unified output stream and returns only the final
+        ``DiffusionOutput``, matching the historical non-streaming behavior.
+        """
+        logger.warning_once(
+            "DiffusionEngine.async_add_req_and_wait_for_response() is deprecated; "
+            "use async_add_req_and_stream_response() and consume the final output instead."
+        )
+        final_output: DiffusionOutput | None = None
+        async for output in self.async_add_req_and_stream_response(request):
+            final_output = output
+        if final_output is None:
+            raise RuntimeError("Diffusion execution completed without an output.")
+        return final_output
 
     def add_req_and_wait_for_response(self, request: OmniDiffusionRequest) -> DiffusionOutput:
         with self._rpc_lock:

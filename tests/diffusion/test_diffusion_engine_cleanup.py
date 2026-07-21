@@ -5,15 +5,17 @@ import asyncio
 import queue
 import threading
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
+from vllm_omni.diffusion import diffusion_engine as diffusion_engine_module
 from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.diffusion_engine import DiffusionEngine, DiffusionExecutionMode
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.sched import DiffusionRequestStatus, RequestScheduler
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+from vllm_omni.outputs import OmniRequestOutput
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu, pytest.mark.diffusion]
 
@@ -119,6 +121,42 @@ def test_init_accepts_custom_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = DiffusionEngine(od_config, scheduler=custom_scheduler)
 
     assert engine.scheduler is custom_scheduler
+
+
+@pytest.mark.asyncio
+async def test_step_compatibility_wrapper_returns_final_batch() -> None:
+    engine = _make_engine()
+    first = [OmniRequestOutput.from_diffusion(request_id="req", images=[], finished=False)]
+    final = [OmniRequestOutput.from_diffusion(request_id="req", images=[], finished=True)]
+
+    async def _step_streaming(_request):
+        yield first
+        yield final
+
+    engine.step_streaming = _step_streaming  # type: ignore[method-assign]
+    with patch.object(diffusion_engine_module.logger, "warning_once") as warning_once:
+        output = await engine.step(_make_request("req"))
+
+    assert output is final
+    warning_once.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_async_wait_compatibility_wrapper_returns_final_output() -> None:
+    engine = _make_engine()
+    first = DiffusionOutput(output="chunk", finished=False)
+    final = DiffusionOutput(output="final", finished=True)
+
+    async def _stream_response(_request):
+        yield first
+        yield final
+
+    engine.async_add_req_and_stream_response = _stream_response  # type: ignore[method-assign]
+    with patch.object(diffusion_engine_module.logger, "warning_once") as warning_once:
+        output = await engine.async_add_req_and_wait_for_response(_make_request("req"))
+
+    assert output is final
+    warning_once.assert_called_once()
 
 
 def test_abort_request_id_aborts_scheduler_request() -> None:
