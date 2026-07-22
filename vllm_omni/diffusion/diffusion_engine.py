@@ -44,7 +44,7 @@ from vllm_omni.diffusion.registry import (
     get_diffusion_pre_process_func,
 )
 from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
-from vllm_omni.diffusion.sched import RequestScheduler, SchedulerInterface, StepScheduler
+from vllm_omni.diffusion.sched import BaseScheduler, RequestScheduler, StepScheduler
 from vllm_omni.diffusion.sched.interface import DiffusionRequestStatus
 from vllm_omni.diffusion.worker.utils import BaseRunnerOutput, BatchRunnerOutput, RunnerOutput
 from vllm_omni.errors import client_error_from_metadata, is_client_error_status
@@ -157,7 +157,7 @@ class DiffusionEngine:
     def __init__(
         self,
         od_config: OmniDiffusionConfig,
-        scheduler: SchedulerInterface | None = None,
+        scheduler: BaseScheduler | None = None,
     ):
         """Initialize the diffusion engine.
 
@@ -211,7 +211,7 @@ class DiffusionEngine:
     def _init_scheduler(
         self,
         od_config: OmniDiffusionConfig,
-        scheduler: SchedulerInterface | None = None,
+        scheduler: BaseScheduler | None = None,
     ) -> None:
         if scheduler is not None:
             self.scheduler = scheduler
@@ -633,7 +633,7 @@ class DiffusionEngine:
     @staticmethod
     def make_engine(
         config: OmniDiffusionConfig,
-        scheduler: SchedulerInterface | None = None,
+        scheduler: BaseScheduler | None = None,
     ) -> DiffusionEngine:
         """Factory method to create the engine selected by ``config.engine_backend``.
 
