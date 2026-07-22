@@ -136,10 +136,9 @@ def format_diffusion_outputs(
         "resolution": int(request.sampling_params.resolution),
     }
 
-    # Detect text output: when the pipeline returns a string (e.g.,
-    # SenseNova-U1 / BAGEL single-stage img2text / text2text), wrap it
-    # as a text-type response instead of an image.
-    is_text_output = postprocess_output.primary_key == "text" or "text" in postprocess_output.metadata
+    # Only the primary payload determines the response type. Some image models
+    # include reasoning text in metadata, but their final output is still an image.
+    is_text_output = postprocess_output.primary_key == "text"
 
     is_audio_output = supports_audio_output(od_config.model_class_name)
     audio_sample_rate = _metadata_audio_sample_rate(postprocess_output.metadata)
