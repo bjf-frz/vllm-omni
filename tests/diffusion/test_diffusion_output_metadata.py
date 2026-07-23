@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from vllm_omni.outputs.output_types import (
+from vllm_omni.outputs.output_metadata import (
     strip_internal_metadata,
     validate_diffusion_metadata,
     validate_public_diffusion_metadata,

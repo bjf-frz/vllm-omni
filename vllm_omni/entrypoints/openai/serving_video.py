@@ -29,7 +29,7 @@ from vllm_omni.entrypoints.openai.stage_params import (
 from vllm_omni.entrypoints.openai.utils import get_stage_type, parse_lora_request
 from vllm_omni.entrypoints.openai.video_api_utils import _encode_video_bytes, encode_video_base64
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
-from vllm_omni.outputs.output_types import (
+from vllm_omni.outputs.output_metadata import (
     DiffusionMetadataMapping,
     DiffusionMultimodalOutput,
     DiffusionPayloadValue,

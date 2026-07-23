@@ -13,7 +13,7 @@ from vllm_omni.diffusion.registry import DiffusionModelRegistry
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniPromptType
 from vllm_omni.outputs import OmniRequestOutput
-from vllm_omni.outputs.output_types import (
+from vllm_omni.outputs.output_metadata import (
     DiffusionMetadata,
     DiffusionMultimodalOutput,
     DiffusionOutputEnvelope,
@@ -133,7 +133,11 @@ def format_diffusion_outputs(
     outputs = _ensure_list(primary_payload)
     metrics = {
         "image_num": int(request.sampling_params.num_outputs_per_prompt),
-        "resolution": int(request.sampling_params.resolution),
+        "resolution": (
+            int(request.sampling_params.resolution) if request.sampling_params.resolution is not None else None
+        ),
+        "width": request.sampling_params.width,
+        "height": request.sampling_params.height,
     }
 
     # Only the primary payload determines the response type. Some image models

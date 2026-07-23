@@ -125,7 +125,7 @@ from vllm_omni.entrypoints.openai.utils import (
 from vllm_omni.errors import OmniClientError
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
-from vllm_omni.outputs.output_types import DiffusionMetadataMapping, DiffusionMetadataValue
+from vllm_omni.outputs.output_metadata import DiffusionMetadataMapping, DiffusionMetadataValue
 from vllm_omni.utils.audio import audio_chunk_pcm_bytes, audio_chunk_sample_rate
 
 logger = init_logger(__name__)
@@ -454,6 +454,18 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         engine_output_modalities = [x for x in self.engine_client.output_modalities if x is not None]
         output_modalities = getattr(request, "modalities", engine_output_modalities)
         request.modalities = output_modalities if output_modalities is not None else engine_output_modalities
+
+        if not isinstance(request.modalities, list) or not all(isinstance(m, str) for m in request.modalities):
+            return self.create_error_response("'modalities' must be a list of strings.")
+        allowed_modalities = set(engine_output_modalities)
+        if is_single_stage_diffusion(self.engine_client):
+            allowed_modalities.add("text")
+        unsupported = set(request.modalities) - allowed_modalities
+        if unsupported:
+            return self.create_error_response(
+                f"Unsupported output modalities {', '.join(sorted(unsupported))} for this model. "
+                f"Supported modalities: {', '.join(sorted(allowed_modalities))}",
+            )
 
         if request.modalities and "audio" in request.modalities:
             audio_format_check = self._resolve_audio_format(request)

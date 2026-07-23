@@ -93,6 +93,8 @@ def test_formatter_preserves_single_video_audio_actions_and_metadata(
     assert result.metrics == {
         "image_num": 1,
         "resolution": 512,
+        "width": None,
+        "height": None,
     }
 
 
